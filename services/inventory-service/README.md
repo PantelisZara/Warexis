@@ -1,10 +1,10 @@
 # Inventory Service
 
-Java 21 / Spring Boot stock API backed by its own PostgreSQL database. Flyway V1
-owns `stock_items`; Hibernate validates the schema and never generates it.
+Java 21 / Spring Boot stock API backed by its own PostgreSQL database. Flyway V1 owns `stock_items`; V2 owns reservation decisions, processed-event
+identities, and outgoing events; Hibernate validates the schema and never generates it.
 
-This is an unauthenticated local-development API. Authentication, reservations,
-Kafka, outbox, and idempotent consumers are outside this implementation.
+This is an unauthenticated local-development API. Authentication and Kafka adapters are outside this implementation. Reservations
+are an internal application use case; no reservation HTTP endpoint is exposed.
 
 ## Run locally
 
@@ -49,6 +49,42 @@ curl -i -X PUT -H 'Content-Type: application/json' \
   -d '{"onHand":8}' http://127.0.0.1:8082/api/stock-items/SKU-001
 ```
 
+## Internal inventory reservations
+
+`InventoryReservationService.process(OrderPlaced)` accepts a validated event ID,
+order ID, and 1 to 100 original lines (`orderLineId`, case-sensitive `sku`, positive
+32-bit `quantity`). Order line IDs must be unique. A future Kafka adapter must
+validate the envelope/type/version before invoking this business use case.
+
+The transaction locks event identity and then order identity with PostgreSQL
+transaction advisory locks in separate integer namespaces. Hash collisions only
+reduce concurrency. Database primary/unique keys also enforce durable event
+idempotency and one reservation decision per order. It aggregates repeated SKU
+demand in 64-bit integers, locks existing stock rows in case-sensitive ASCII order
+(matching PostgreSQL C collation), and checks every SKU before changing any stock.
+Unknown SKUs take precedence over insufficient stock. Rejection reserves nothing;
+success reserves every line atomically. Existing stock updates use the same row
+locks and cannot lower on-hand stock below reserved quantities.
+
+One transaction covers stock updates, immutable `inventory_reservations`,
+`processed_order_events`, and an `outbox_events` record. The complete version 1
+JSON envelope is stored with metadata and nullable `published_at`; an unpublished
+partial index supports the future relay. Reserved events omit `reasonCode`;
+rejected events include `UNKNOWN_SKU` or `INSUFFICIENT_STOCK`. Both preserve the
+original ordered lines, use reservation ID as aggregate ID, order ID as correlation
+ID, and the first accepted input event ID as causation ID. See the
+[event contracts](../../docs/architecture/event-contracts.md).
+
+An exact duplicate event returns the durable decision without additional writes.
+A new event ID for the same order and identical ordered lines records the new
+processed identity and returns the original decision without reserving again or
+creating another outgoing event. The decision remains final even if stock later
+changes. Reusing an event ID for a different order or payload, or an order ID for
+different ordered lines, raises `ConflictingOrderPlacedException` and rolls back.
+This is unprocessable conflicting input for future quarantine handling, not a
+business rejection. No relay, polling scheduler, transport retries, or Kafka
+producer/consumer is implemented here.
+
 ## Verify
 
 Run from this directory with Java 21 and Docker available:
@@ -59,5 +95,6 @@ Run from this directory with Java 21 and Docker available:
 ```
 
 Tests run domain checks and HTTP/persistence integration against disposable
-PostgreSQL 18.6 Testcontainers, including schema constraints and concurrent
-row-lock behavior. They do not use the persistent local-development database.
+PostgreSQL 18.6 Testcontainers, including schema constraints, atomic reservation/outbox rollback, idempotency,
+concurrent duplicate/order races, oversell prevention, and deterministic row-lock
+behavior. They do not use the persistent local-development database.
