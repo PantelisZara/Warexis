@@ -55,6 +55,8 @@ class InventoryServiceApplicationTests {
         }
 
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
+        assertThat(flyway.info().applied()).hasSize(1);
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("1");
     }
 
     @Test
