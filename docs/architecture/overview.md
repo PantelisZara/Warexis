@@ -6,15 +6,15 @@ Order and Inventory service foundations are present with independent configurati
 
 Local Docker Compose infrastructure provides separate PostgreSQL 18.6 containers and Apache Kafka 4.2.2 in a single-node KRaft setup, with persistent Docker volumes and health checks. This infrastructure does not yet provide an operational business messaging workflow.
 
-The workflow and domain ownership described below are the intended architecture. Domain entities, Flyway business schema migrations, business REST APIs, Kafka producers and consumers, event publication and processing, transactional outbox, idempotency, reservation logic, and concurrency control remain planned. Fulfillment, authentication/security, and a frontend are future work.
+Order creation/read and Inventory stock create/read/update APIs now have independent domain persistence and Flyway business schemas. Inventory stock updates take a database row lock and preserve stock invariants. Orders stay `PENDING_INVENTORY`. The messaging workflow described below remains intended architecture: Kafka producers and consumers, event publication and processing, transactional outbox, idempotency, reservations, and reservation concurrency control are not implemented. Fulfillment, authentication/security, and a frontend are future work.
 
 The first workflow connects Order and Inventory. Fulfillment will follow only after that workflow has been verified. Warexis centers on backend business coordination; a storefront is outside the initial scope.
 
 ## Ownership and communication
 
-The planned domain boundaries assign orders, order lines, and the order lifecycle to Order, and stock items and reservations to Inventory. Each service controls its PostgreSQL database and Flyway migrations. Shared database tables, cross-service queries, and cross-service writes are prohibited.
+The domain boundaries assign orders, order lines, and the order lifecycle to Order, and stock items and future reservations to Inventory. Each service controls its PostgreSQL database and Flyway migrations. Shared database tables, cross-service queries, and cross-service writes are prohibited.
 
-REST is intended for client commands and queries, such as creating an order and reading its current status. The exact endpoints and response shapes remain to be designed. Inventory decisions will travel asynchronously through Kafka; an Order request must not wait on a synchronous Inventory call to complete the business workflow.
+REST handles client commands and queries. Order exposes create/read endpoints; Inventory exposes stock create/read/update endpoints. Their contracts are documented in the [Order guide](../../services/order-service/README.md) and [Inventory guide](../../services/inventory-service/README.md). Inventory decisions will travel asynchronously through Kafka; an Order request must not wait on a synchronous Inventory call to complete the business workflow.
 
 The following sequence is planned; event publication and processing are not yet implemented.
 

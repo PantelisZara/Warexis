@@ -1,6 +1,6 @@
 # Initial domain model
 
-These are conceptual domain definitions, not implemented entities or a finalized database schema. Identifier storage types, constraints, API validation, and migrations will be specified during implementation.
+Order, OrderLine, and StockItem are implemented with service-owned Flyway schemas and UUID identifiers. InventoryReservation and the event-driven lifecycle transitions below remain conceptual. API details are documented in each service guide.
 
 ## Order Service
 
@@ -9,7 +9,7 @@ These are conceptual domain definitions, not implemented entities or a finalized
 | Order | `id`, `status`, `createdAt`, `updatedAt`, order lines | Own the lifecycle of one order |
 | OrderLine | `id`, `sku`, `quantity` | Identify requested stock and quantity within an order |
 
-An order needs at least one line, a non-empty SKU for each line, and positive integer quantities. Inventory must consider the total requested quantity for each SKU, including repeated SKUs across lines.
+An order accepts 1–100 lines, a case-sensitive SKU matching `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` for each line, and positive JSON integer quantities. Creation records `PENDING_INVENTORY`; the status has no public mutation endpoint. Inventory must consider the total requested quantity for each SKU, including repeated SKUs across lines.
 
 ```mermaid
 stateDiagram-v2
@@ -40,6 +40,6 @@ Reservation lines conceptually retain the requested SKU, quantity, and source or
 - Concurrent reservations must not oversell stock.
 - The initial workflow has one reservation decision per `orderId`; repeated processing returns or preserves that decision without changing stock again.
 
-Locking or conditional-update strategies and database constraints remain implementation choices. The all-or-nothing guarantee must be verified with real PostgreSQL concurrency tests.
+Stock invariants and SKU uniqueness are enforced by PostgreSQL constraints. Stock update requests use row locking. Reservation locking and transactional behavior remain implementation work. The all-or-nothing guarantee must be verified with real PostgreSQL concurrency tests.
 
-Stock release, reservation expiry, stock adjustment interfaces, and fulfillment deductions are outside this initial model. See the [event contracts](event-contracts.md) for the messages connecting these domains.
+Stock create/read/update APIs are implemented. Stock release, reservation expiry, and fulfillment deductions remain future work. See the [event contracts](event-contracts.md) for the messages connecting these domains.

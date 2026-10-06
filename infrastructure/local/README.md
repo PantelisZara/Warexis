@@ -21,7 +21,7 @@ example file. Never commit real credentials or a `.env` file.
 
 Each PostgreSQL service owns an independent database cluster and data volume.
 The local bootstrap users are administrators of their respective development
-clusters. Application roles and migrations belong to future service work.
+clusters. Business schemas are managed by service-owned Flyway migrations. Separate least-privilege application roles remain future work.
 
 Kafka runs one combined KRaft broker/controller without ZooKeeper. Host clients
 use the loopback endpoint; containers on the project network use `kafka:29092`.
@@ -84,12 +84,15 @@ trusted local infrastructure environment file instead of `.env.example` in each
 recipe. The passwords must match the existing databases. The values in
 `.env.example` are local examples only; never commit real credentials.
 
+The recipes bind the HTTP APIs to loopback because authentication is a later milestone.
+
 Start Order Service on HTTP port 8081:
 
 ```sh
 (
   . ./.env.example
   cd services/order-service || exit
+  SERVER_ADDRESS=127.0.0.1 \
   SERVER_PORT=8081 \
   ORDER_DB_URL='jdbc:postgresql://127.0.0.1:15432/warexis_order' \
   ORDER_DB_USERNAME=warexis_order \
@@ -104,6 +107,7 @@ Start Inventory Service on HTTP port 8082:
 (
   . ./.env.example
   cd services/inventory-service || exit
+  SERVER_ADDRESS=127.0.0.1 \
   SERVER_PORT=8082 \
   INVENTORY_DB_URL='jdbc:postgresql://127.0.0.1:15433/warexis_inventory' \
   INVENTORY_DB_USERNAME=warexis_inventory \
