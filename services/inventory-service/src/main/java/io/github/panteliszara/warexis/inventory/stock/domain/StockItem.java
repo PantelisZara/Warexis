@@ -49,6 +49,16 @@ public class StockItem {
         this.onHand = onHand;
     }
 
+    public void reserve(int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("Reservation quantity must be positive.");
+        }
+        if (quantity > getAvailable()) {
+            throw new StockConflictException("Insufficient stock for reservation.");
+        }
+        reserved += quantity;
+    }
+
     public UUID getId() {
         return id;
     }
