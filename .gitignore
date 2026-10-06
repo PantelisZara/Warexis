@@ -1,0 +1,48 @@
+# Java / Maven
+target/
+*.class
+*.log
+hs_err_pid*
+replay_pid*
+
+# Node
+node_modules/
+.npm/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/install-state.gz
+*.tsbuildinfo
+
+# Build and test output
+build/
+dist/
+out/
+coverage/
+.cache/
+.vite/
+playwright-report/
+test-results/
+
+# IDEs and editors
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Local environment configuration
+.env
+.env.*
+!.env.example
