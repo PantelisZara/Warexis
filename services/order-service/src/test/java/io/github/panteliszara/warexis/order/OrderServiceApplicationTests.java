@@ -60,9 +60,12 @@ class OrderServiceApplicationTests {
                 var statement = connection.createStatement()) {
             assertThat(connection.getMetaData().getDatabaseProductName()).isEqualTo("PostgreSQL");
 
-            try (var result = statement.executeQuery("SELECT version, success FROM flyway_schema_history")) {
+            try (var result = statement.executeQuery("SELECT version, success FROM flyway_schema_history ORDER BY installed_rank")) {
                 assertThat(result.next()).isTrue();
                 assertThat(result.getString("version")).isEqualTo("1");
+                assertThat(result.getBoolean("success")).isTrue();
+                assertThat(result.next()).isTrue();
+                assertThat(result.getString("version")).isEqualTo("2");
                 assertThat(result.getBoolean("success")).isTrue();
                 assertThat(result.next()).isFalse();
             }
@@ -163,9 +166,11 @@ class OrderServiceApplicationTests {
     void rejectsInvalidRequestsWithoutPartialPersistence(String body) throws Exception {
         var ordersBefore = countRows("orders");
         var linesBefore = countRows("order_lines");
+        var eventsBefore = countRows("outbox_events");
         assertProblem(post(body), 400);
         assertThat(countRows("orders")).isEqualTo(ordersBefore);
         assertThat(countRows("order_lines")).isEqualTo(linesBefore);
+        assertThat(countRows("outbox_events")).isEqualTo(eventsBefore);
     }
 
     @Test

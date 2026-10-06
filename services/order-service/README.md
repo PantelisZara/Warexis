@@ -2,7 +2,8 @@
 
 Java 21 / Spring Boot service owning order persistence and its HTTP API. Flyway
 creates the PostgreSQL schema; Hibernate validates it. Order creation persists an
-aggregate atomically and starts in `PENDING_INVENTORY`.
+aggregate and one durable `OrderPlaced` outbox event in the same transaction,
+and starts in `PENDING_INVENTORY`.
 
 ## Run locally
 
@@ -72,12 +73,32 @@ details and creates no partial order. Unsupported HTTP methods return `405` and
 unsupported request media types return `415`.
 
 The API is intended for local development at this stage. Authentication,
-authorization, Kafka publication/consumption, outbox, inventory reservations and
+authorization, Kafka publication/consumption, inventory reservations and
 status transitions are not implemented. `CONFIRMED` and `REJECTED` are reserved
 domain statuses for the later asynchronous workflow. No inventory database is
 accessed. Minimum line count is enforced by the aggregate/application boundary;
 PostgreSQL independently enforces line values, positions, uniqueness and foreign
 keys.
+
+## Transactional outbox
+
+Order creation writes the order, original lines and `outbox_events` row in one
+PostgreSQL transaction. Failure of any write rolls back the entire creation.
+Each row stores the complete version 1 JSON envelope from
+[the event contracts](../../docs/architecture/event-contracts.md), plus event ID,
+aggregate ID, event type/version, occurrence time, correlation ID and optional
+causation ID as queryable metadata. `OrderPlaced` uses the order creation time
+at microsecond precision, `aggregateId = correlationId = orderId`, and omits
+`causationId`. Payload lines preserve original identities and order, including
+repeated SKUs; no persistence entities are serialized.
+
+The event ID is unique. An additional aggregate/type/version constraint prevents
+a second `OrderPlaced` v1 event for the same order. PostgreSQL checks envelope
+metadata consistency and enforces an aggregate foreign key. `published_at` is
+initially null, with a partial `(occurred_at, event_id)` index for future polling
+of unpublished rows. No publisher, scheduler, Kafka adapter or publication
+claim/lease mechanism exists yet. Future publication must reuse the persisted
+envelope and event ID, since retries can duplicate delivery.
 
 ## Verify
 
