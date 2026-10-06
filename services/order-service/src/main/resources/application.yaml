@@ -1,6 +1,11 @@
 spring:
   application:
     name: warexis-order-service
+  jackson:
+    mapper:
+      allow-coercion-of-scalars: false
+    deserialization:
+      accept-float-as-int: false
   datasource:
     url: ${ORDER_DB_URL}
     username: ${ORDER_DB_USERNAME}
