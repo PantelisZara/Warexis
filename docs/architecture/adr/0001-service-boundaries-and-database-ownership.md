@@ -1,6 +1,6 @@
 # ADR 0001: Service boundaries and database ownership
 
-Status: Accepted. Independent services, core domains, and database ownership are established; the reservation workflow remains planned.
+Status: Accepted. Independent services, core domains, and database ownership are established; local reservation processing is implemented, while cross-service Kafka delivery remains planned.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0003: Transactional outbox and idempotent consumers
 
-Status: Accepted architectural direction; implementation pending.
+Status: Accepted. Local Order/Inventory outboxes and Inventory idempotent processing are implemented; transport adapters remain planned.
 
 ## Context
 
@@ -8,7 +8,7 @@ Updating PostgreSQL and publishing to Kafka are separate operations. A failure b
 
 ## Decision
 
-When messaging is implemented, persist each outgoing event in a transactional outbox alongside the corresponding domain changes. A relay publishes committed events and tracks publication progress. Retries retain the original `eventId` and event content.
+Persist each outgoing event in a transactional outbox alongside the corresponding domain changes. Order creation and Inventory reservation processing now implement that local transaction boundary. A future relay will publish committed events and track publication progress. Retries retain the original `eventId` and event content.
 
 Consumers persist processed event identifiers atomically with their business changes and any outgoing outbox events. Acknowledge processing only after commit. Enforce domain-level uniqueness as well, including one reservation decision per order in the initial workflow.
 
@@ -22,4 +22,5 @@ A local database transaction closes the gap between a business update and record
 - Outbox and deduplication storage need indexing, monitoring, and a retention policy compatible with supported replay windows.
 - Concurrent duplicate processing must be controlled by database constraints and transactions.
 - Relay ordering must preserve the required per-order publication order; assigning a Kafka key alone is insufficient.
-- Relay implementation, cleanup, and recovery tooling add complexity. None is implemented by this documentation task.
+- Phase 3 outboxes store complete JSON envelopes and minimal publication metadata, with uniqueness constraints and indexes for unpublished events. No relay, claiming/lease system, attempt counter, or cleanup runs yet.
+- Relay implementation and durable bounded recovery remain the next milestone, as defined in [ADR 0004](0004-message-topology-and-delivery-semantics.md). Order outcome consumption/deduplication remains planned.
