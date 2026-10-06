@@ -1,6 +1,6 @@
 # ADR 0001: Service boundaries and database ownership
 
-Status: Accepted architectural direction; implementation pending.
+Status: Accepted. Independent services, core domains, and database ownership are established; the reservation workflow remains planned.
 
 ## Context
 

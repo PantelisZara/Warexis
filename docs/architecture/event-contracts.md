@@ -1,6 +1,6 @@
 # Initial conceptual event contracts
 
-These contracts are architectural design at the foundation stage. They are not implemented message classes, registered schemas, or finalized wire contracts. Producers and consumers will need contract validation and compatibility tests when messaging is implemented. No shared Java event classes are defined here.
+These contracts are architectural design for the planned messaging milestone. They are not implemented message classes, registered schemas, or finalized wire contracts. Producers and consumers will need contract validation and compatibility tests when messaging is implemented. No shared Java event classes are defined here.
 
 ## Common envelope
 
