@@ -23,10 +23,20 @@ recording deduplication and changing the order to `CONFIRMED` or `REJECTED`.
 Poll `GET /api/orders/{id}` for the final decision. Confirmation records a stock
 reservation; it does not deduct stock again or implement fulfillment.
 
+`eventId` identifies a message; `orderId` enforces one business reservation
+decision. Database constraints and transaction locks protect those identities.
+Identical redelivery and matching event aliases reuse the existing decision.
+Contradictory Inventory outcomes in either direction preserve the original
+terminal Order state and go directly to DLT. A valid outcome for an unknown order
+also goes directly to DLT. These are contract failures, rather than technical
+retry or business rejection. Inventory locks overlapping SKUs in deterministic
+case-sensitive order; stock updates, reservation, processed event and outgoing
+outbox record commit or roll back together.
+
 Producers retain event IDs and stored values on retries. Listeners acknowledge
-source offsets after their application transaction commits, or after successful
-DLT publication. Byte-array keys/values let DLTs retain malformed UTF-8 and
-unparseable payloads. DLT headers use `warexis-source-topic`,
+source offsets after their application transaction and durable delivery completion
+commit, or after confirmed DLT publication and durable delivery completion.
+Byte-array keys/values let DLTs retain malformed UTF-8 and unparseable payloads. DLT headers use `warexis-source-topic`,
 `warexis-source-partition`, `warexis-source-offset`, `warexis-consumer-group`,
 `warexis-failure-code`, `warexis-processing-attempts`, `warexis-dlt-attempts`, and
 `warexis-failed-at`. No DLT redrive consumer or cleanup task runs automatically.
@@ -123,8 +133,33 @@ terminal state and identity validation prevent a contradictory decision.
 
 Run each service's `./mvnw test` and `./mvnw verify`, then run the
 [packaged-service Kafka workflow suite](../../tests/workflow/README.md).
-These suites use disposable real PostgreSQL/Kafka infrastructure. They cover both
-business outcomes, duplicate delivery, strict transport validation, DLT behavior,
-concurrency, transaction rollback, and durable failure recovery. Local results do
-not establish production fault tolerance. Hosted GitHub Actions execution remains
-pending until repository publication.
+These suites use disposable real PostgreSQL/Kafka infrastructure. Service tests
+repeatedly synchronize oversubscribed reservations, overlapping/reversed SKU
+inputs and concurrent duplicate event IDs or same-order aliases, and reconcile
+stock against committed reservation lines. Test-only database faults verify
+rollback at stock, reservation, processed-event and outbox persistence boundaries.
+
+The packaged suite runs actual executable JARs and checks both service directions
+for pending-outbox recovery, forced termination after business commit but before
+successful delivery checkpoint, temporary database outage with uncommitted source
+offsets, and exhausted DLT budgets. It proves a paused partition remains blocked
+across polls and JVM restart while another partition progresses. Explicit recovery
+then completes several later order IDs on the same partition. Restarting again
+with a new same-partition record proves completed DLT state does not resurrect.
+The broker-outage scenario also retains unpublished event identity and an exhausted
+relay budget across Order restart until explicit operator recovery.
+
+These checks establish at-least-once delivery with idempotent local effects for
+the tested boundaries. Broker acceptance before a database publication checkpoint,
+or a business commit before source acknowledgment, can cause safe replay. Ordering
+is scoped to a Kafka partition with `orderId` as key; unrelated partitions have no
+global order. Paused records retain their source offset and durable budget. A
+successful business rejection uses one normal processing attempt and no technical
+retry. Database recovery checks restore the database and explicitly restart the
+service; they do not promise automatic recovery from every connection failure.
+
+This is local single-broker verification, not a production durability or capacity
+claim. Replicated-broker failover, permanent database/storage loss and deployment
+scale limits are outside these tests. No distributed exactly-once guarantee or
+unlimited scalability is claimed. Hosted GitHub Actions execution remains pending
+until repository publication.
