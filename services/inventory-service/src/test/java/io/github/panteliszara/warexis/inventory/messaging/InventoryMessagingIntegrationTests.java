@@ -50,6 +50,7 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(properties = {"warexis.messaging.enabled=true", "warexis.messaging.retry-base-delay=10ms",
         "warexis.messaging.poll-interval=24h", "spring.kafka.listener.auto-startup=false"})
 @Testcontainers
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 class InventoryMessagingIntegrationTests {
     @Container @ServiceConnection static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18.6");
     @Container @ServiceConnection static final KafkaContainer broker = new KafkaContainer("apache/kafka:4.2.2");
@@ -385,7 +386,7 @@ class InventoryMessagingIntegrationTests {
     }
 
     @Test
-    void suppressedCompletionAfterBusinessCommitDoesNotRepeatBusinessOrAck() {
+    void suppressedCompletionAfterBusinessCommitDoesNotRepeatBusinessOrAck(org.springframework.boot.test.system.CapturedOutput output) {
         var sku = stock(3);
         var record = event(sku, 1);
         var business = mock(InventoryReservationService.class);
@@ -403,6 +404,7 @@ class InventoryMessagingIntegrationTests {
         assertThat(delivery.load(record).phase()).isEqualTo("PROCESS");
         assertThat(delivery.load(record).processingAttempts()).isEqualTo(1);
         assertThat(delivery.load(record).dltAttempts()).isZero();
+        assertThat(output.getOut()).contains("processingAttempt=1 dltAttempt=0 state=PAUSED classification=METADATA_OR_ACK_UNAVAILABLE");
         assertThat(stocks.get(sku).getReserved()).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM inventory_reservations")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM outbox_events")).isEqualTo(1);
@@ -410,7 +412,7 @@ class InventoryMessagingIntegrationTests {
 
     @Test
     @SuppressWarnings("unchecked")
-    void suppressedCompletionAfterDltBrokerAckDoesNotResendOrAck() {
+    void suppressedCompletionAfterDltBrokerAckDoesNotResendOrAck(org.springframework.boot.test.system.CapturedOutput output) {
         var record = new ConsumerRecord<byte[], byte[]>("warexis.order.events.v1", 1, offset.incrementAndGet(),
                 UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xc3, 0x28});
         KafkaTemplate<byte[], byte[]> transport = mock(KafkaTemplate.class);
@@ -427,6 +429,7 @@ class InventoryMessagingIntegrationTests {
         verify(consumer).pause(java.util.Set.of(new TopicPartition(record.topic(), record.partition())));
         assertThat(delivery.load(record).phase()).isEqualTo("DLT");
         assertThat(delivery.load(record).dltAttempts()).isEqualTo(1);
+        assertThat(output.getOut()).contains("processingAttempt=0 dltAttempt=1 state=PAUSED classification=METADATA_OR_ACK_UNAVAILABLE");
         assertThat(consume(InventoryOrderListener.DLT, record.key()).value()).containsExactly(record.value());
         assertThat(count("SELECT count(*) FROM inventory_reservations")).isZero();
     }

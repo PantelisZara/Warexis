@@ -81,8 +81,13 @@ public class InventoryOutboxPublisher {
                     update.setObject(2, id);
                     if (update.executeUpdate() != 1) throw new SQLException("Publication retry budget unavailable.");
                 }
+                log.info("Inventory relay eventId={} eventType={} orderId={} aggregateId={} attempt={} state=SEND",
+                        id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class),
+                        row.getObject("aggregate_id", java.util.UUID.class), attempts + 1);
                 try { kafka.send("warexis.inventory.events.v1", key, value).get(11, TimeUnit.SECONDS); }
                 catch (Exception exception) {
+                    log.warn("Inventory relay eventId={} eventType={} orderId={} attempt={} state=RETRY classification=BROKER_UNAVAILABLE",
+                            id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class), attempts + 1);
                     if (exception instanceof InterruptedException) Thread.currentThread().interrupt();
                     if (attempts + 1 >= 5) pause(connection, "RETRY_EXHAUSTED");
                     return;
@@ -91,6 +96,8 @@ public class InventoryOutboxPublisher {
                     update.setObject(1, id);
                     if (update.executeUpdate() != 1) throw new SQLException("Publication metadata unavailable.");
                 }
+                log.info("Inventory relay eventId={} eventType={} orderId={} attempt={} state=PUBLISHED",
+                        id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class), attempts + 1);
             }
         }
     }
