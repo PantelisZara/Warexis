@@ -3,7 +3,7 @@
 Java 21 / Spring Boot stock API backed by its own PostgreSQL database. Flyway V1 owns `stock_items`; V2 owns reservation decisions, processed-event
 identities, and outgoing events; Hibernate validates the schema and never generates it.
 
-This is an unauthenticated local-development API. Authentication and Kafka adapters are outside this implementation. Reservations
+This is an unauthenticated local-development API. Authentication is outside this implementation. Kafka adapters are opt-in. Reservations
 are an internal application use case; no reservation HTTP endpoint is exposed.
 
 ## Run locally
@@ -81,9 +81,66 @@ processed identity and returns the original decision without reserving again or
 creating another outgoing event. The decision remains final even if stock later
 changes. Reusing an event ID for a different order or payload, or an order ID for
 different ordered lines, raises `ConflictingOrderPlacedException` and rolls back.
-This is unprocessable conflicting input for future quarantine handling, not a
-business rejection. No relay, polling scheduler, transport retries, or Kafka
-producer/consumer is implemented here.
+This is unprocessable conflicting input for quarantine handling, not a business
+rejection. The Kafka listener validates the wire contract before invoking this
+internal application use case.
+
+## Kafka workflow and recovery
+
+Messaging defaults to disabled. Set `WAREXIS_MESSAGING_ENABLED=true` and
+`KAFKA_BOOTSTRAP_SERVERS` to enable the listener and scheduled outbox relay.
+The adapters create the three-partition local source/output topics and Inventory
+DLT, using replication factor one. Inventory consumes `warexis.order.events.v1`
+as `warexis.inventory.order-events.v1` and publishes committed decisions to
+`warexis.inventory.events.v1`; every workflow record key is the canonical order
+UUID. The transport uses raw bytes with strict UTF-8/JSON validation, so malformed
+UTF-8, duplicate JSON fields, trailing JSON, unsupported types/versions, bad keys,
+and conflicting immutable identities cannot mutate stock. Compatible optional
+fields are accepted. Business rejection commits normally and is acknowledged.
+
+The listener acknowledges only after the reservation transaction commits and
+its durable delivery checkpoint is recorded. Transient processing failures get
+four total attempts, with 1/2/4-second delays. Invalid contracts/conflicts go
+directly to `warexis.order.events.v1.inventory.dlt`. DLT publication retains the
+original key/value bytes and source partition, with safe `warexis-*` source,
+group, failure classification, attempt, and timestamp headers. Source offsets
+advance only after the DLT broker acknowledgment and durable checkpoint. DLT
+publication gets four total attempts before its source partition is paused.
+
+V3 `consumer_delivery_state` stores budgets and PROCESS/DLT/COMPLETE/PAUSED state
+by consumer group/topic/partition/offset. Attempts are recorded before work;
+crashes consume their recorded attempt instead of resetting the bound. PAUSED
+records restore their offset and partition pause after reassignment/restart.
+Delivery-metadata failures immediately seek/pause without another business
+attempt or source acknowledgment; healthy partitions may continue. There is no
+automatic DLT consumer or redrive loop.
+
+The relay processes only the earliest unpublished row, waits for broker
+acknowledgment, and then marks publication. A PostgreSQL session advisory lock
+(namespace 90/key 1) spans publication/checkpointing, allowing one active relay
+per Inventory database without leases. Acknowledgment followed by database
+failure may publish the same stored event again; consumers must be idempotent.
+V3 adds `publication_attempts`/`next_attempt_at` to the outbox and singleton
+`outbox_relay_control`. After five total attempts (1/2/4/8-second retry delays),
+or immediately for an invalid stored contract, the entire relay durably pauses.
+It keeps all unpublished rows and cannot skip the failed row. Metadata failures
+stop the current poll before further sends. Producer `acks=all`, zero internal
+retries, and finite timeouts keep each recorded attempt bounded.
+
+Recovery is an explicit operator action after remediation. Stop the relevant
+adapter before updating retry state, inspect the affected record and preserve
+its original identities/bytes, then restart the listener/relay. Reset only the
+chosen source row to PROCESS (or DLT when only quarantine delivery failed), its
+relevant attempt count and `next_attempt_at`; clear its failure code. For relay
+recovery, reset the blocked head row's publication budget/due time and clear the
+singleton relay pause. These actions intentionally grant a fresh bounded budget;
+a normal application restart grants none. No automatic cleanup or retention
+window is implemented. Align broker retention, replay, and durable dedupe
+retention before introducing deletion.
+
+`warexis.messaging.retry-base-delay` defaults to `1s` and may be reduced for
+integration tests; `warexis.messaging.poll-interval` defaults to `250ms`.
+The stock HTTP API remains unchanged when messaging is disabled.
 
 ## Verify
 
