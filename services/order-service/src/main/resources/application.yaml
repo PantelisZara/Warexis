@@ -15,6 +15,12 @@ spring:
     hibernate:
       ddl-auto: validate
 
+warexis:
+  messaging:
+    enabled: ${WAREXIS_MESSAGING_ENABLED:false}
+    retry-base-delay: ${WAREXIS_MESSAGING_RETRY_BASE_DELAY:1s}
+    poll-interval: ${WAREXIS_MESSAGING_POLL_INTERVAL:250ms}
+
 management:
   endpoints:
     web:

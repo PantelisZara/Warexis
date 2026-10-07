@@ -56,6 +56,17 @@ public class Order {
         return order;
     }
 
+    public void resolveInventory(boolean reserved, Instant now) {
+        if (status != OrderStatus.PENDING_INVENTORY) {
+            throw new IllegalStateException("Order already has an inventory decision.");
+        }
+        status = reserved ? OrderStatus.CONFIRMED : OrderStatus.REJECTED;
+        updatedAt = Objects.requireNonNull(now).truncatedTo(ChronoUnit.MICROS);
+        if (updatedAt.isBefore(createdAt)) {
+            updatedAt = createdAt;
+        }
+    }
+
     public UUID getId() {
         return id;
     }
