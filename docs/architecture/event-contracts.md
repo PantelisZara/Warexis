@@ -1,6 +1,6 @@
 # Version 1 event contracts
 
-These JSON contracts define the initial Order/Inventory workflow. Order creation and Inventory reservation processing persist these envelopes in local transactional outboxes. Kafka publishers, listeners, offset handling, retries, and DLT delivery remain the next implementation milestone. No shared Java event library or Schema Registry is required; each service owns its representations and contract tests.
+These JSON contracts define the initial Order/Inventory workflow. Order creation and Inventory reservation processing persist these envelopes in local transactional outboxes. Opt-in Kafka publishers/listeners now implement offset handling, durable bounded attempts, and DLT delivery. No shared Java event library or Schema Registry is required; each service owns its representations and contract tests.
 
 ## Common envelope
 
@@ -58,7 +58,7 @@ Inventory must evaluate all lines atomically, account for repeated SKUs, and pre
 
 **Producer:** Inventory Service. **Consumer:** Order Service.
 
-Records a successful reservation of every requested line. The stock updates, reservation decision, consumer deduplication record, and outcome outbox entry must commit together. The future Order outcome handler will transition `PENDING_INVENTORY` to `CONFIRMED`.
+Records a successful reservation of every requested line. The stock updates, reservation decision, consumer deduplication record, and outcome outbox entry must commit together. The Order outcome handler transitions `PENDING_INVENTORY` to `CONFIRMED`.
 
 **Payload:** `orderId`, `reservationId`, `lines`. **Aggregate:** InventoryReservation; `aggregateId = reservationId`. `causationId` references the triggering `OrderPlaced` event.
 
@@ -89,7 +89,7 @@ Records a successful reservation of every requested line. The stock updates, res
 
 **Producer:** Inventory Service. **Consumer:** Order Service.
 
-Records rejection of the entire reservation. No requested stock is reserved. The rejected decision, consumer deduplication record, and outcome outbox entry must commit together. The future Order outcome handler will transition `PENDING_INVENTORY` to `REJECTED`.
+Records rejection of the entire reservation. No requested stock is reserved. The rejected decision, consumer deduplication record, and outcome outbox entry must commit together. The Order outcome handler transitions `PENDING_INVENTORY` to `REJECTED`.
 
 **Payload:** `orderId`, `reservationId`, `lines`, `reasonCode`. **Aggregate:** InventoryReservation; `aggregateId = reservationId`. `causationId` references the triggering `OrderPlaced` event. Version 1 reason codes are `INSUFFICIENT_STOCK` and `UNKNOWN_SKU`. If any requested SKU is absent, `UNKNOWN_SKU` takes precedence; otherwise insufficient availability produces `INSUFFICIENT_STOCK`. These are valid business results, not processing errors.
 
@@ -121,13 +121,13 @@ This example represents an alternative to the successful outcome above, not a se
 
 ## Processing and duplicate identity
 
-The implemented Inventory application use case accepts the input event UUID, order UUID, and original line list. The next Kafka adapter must validate the full envelope before calling that use case. It must not move reservation business logic into the listener.
+The implemented Inventory application use case accepts the input event UUID, order UUID, and original line list. The Kafka adapter validates the full envelope before calling that use case. Reservation business logic stays in the application service.
 
 - Inventory commits stock changes, the reservation decision, the processed-event record, and exactly one outcome outbox event in the same local transaction. A rejected decision changes no stock.
 - Repeating an `eventId` with the same order and ordered line list returns the existing decision, with no additional reservation or outgoing event. Reusing that ID with a different order or line list is a conflict and must not mutate state.
 - A new `eventId` for the same order and identical ordered line list records that delivery as processed and reuses the original decision. Its original reservation ID and outcome `causationId` remain unchanged. Changed lines, line identities, or order within the list for the same order are a conflict; one order cannot obtain a contradictory decision.
 - `eventId` provides message idempotency; unique `orderId` provides business uniqueness. `correlationId` supports tracing and is not a deduplication key.
-- The future Order outcome handler must validate reservation metadata and lines against its recorded order, transition only `PENDING_INVENTORY` to the matching terminal status, and persist deduplication with the transition. Duplicate matching outcomes are harmless. Conflicting outcomes or inconsistent identities must be quarantined, without overwriting a terminal decision.
+- The Order outcome handler validates reservation metadata and lines against its recorded order, transitions only `PENDING_INVENTORY` to the matching terminal status, and persists deduplication with the transition. Duplicate matching outcomes are harmless. Conflicting outcomes or inconsistent identities must be quarantined, without overwriting a terminal decision.
 
 Neither local atomic transactions nor Kafka keys provide distributed exactly-once processing. At-least-once publication and delivery require these durable business and message invariants.
 
@@ -142,23 +142,23 @@ Use capability streams rather than a topic for each event. See [ADR 0004](adr/00
 
 All replicas of one consumer service use its group; independent consumers use distinct groups. Consumers filter by `eventType`. A documented, recognized event type outside a group's subscription can be acknowledged without business processing after envelope validation. Unknown types and unsupported versions are quarantined until their contracts are understood, rather than silently discarded. Future consumers get their own failure destinations; one group's failed processing must not interfere with another group's offsets or recovery.
 
-The next adapter milestone should provision three partitions per source topic and three for each corresponding DLT, with a single replica in local development. DLT records retain the source partition number; matching partition counts avoid an invalid destination. The three-partition choice permits concurrent processing and partition-order tests without elaborate topology. Local single-replica infrastructure is not production fault tolerance. Topic provisioning is not implemented by this documentation change.
+Enabled services provision three partitions per source topic and three for each corresponding DLT, with a single replica in local development. DLT records retain the source partition number; matching partition counts avoid an invalid destination. The three-partition choice permits concurrent processing and partition-order tests without elaborate topology. Local single-replica infrastructure is not production fault tolerance. Source/DLT topic provisioning uses the service Kafka configuration when messaging is enabled.
 
 Kafka preserves record order only within one topic partition. The `orderId` key keeps related records in that topic partition with a stable partition count, but supplies no global or cross-topic order. A relay must publish in its durable outbox order and wait for acknowledgment before passing a failed record; a listener must finish one record's transaction before advancing the partition. Changing partition counts can move a key between partitions; drain and coordinate a migration rather than assuming ordering survives a live resize. Database locks and uniqueness constraints, not Kafka ordering, prevent overselling across different orders.
 
 ## Bounded delivery and failure handling
 
-These rules are requirements for the next adapter milestone; Phase 3 contains no relay, listener, retry state, DLT infrastructure, or operator recovery tool.
+Both services implement these rules with local durable delivery metadata. See [workflow startup and explicit recovery](kafka-workflow.md). No automatic redrive or event cleanup runs.
 
 ### Outbox publication
 
 Publish committed events only. Mark `published_at` only after Kafka confirms publication. A crash after acknowledgment and before that update can republish the same event; consumer idempotency makes the duplicate harmless. Do not claim that a successful client response means Kafka has received the event.
 
-The planned service relay gets at most five attempts for a pending publication: the initial attempt plus four retries after 1, 2, 4, and 8 seconds. On exhaustion it pauses the entire service relay, surfaces the failure, and retains the pending event. It must not skip the failing row, delete publication intent, or manufacture a business rejection. An operator explicitly resumes after remediation. The next milestone must persist attempts and paused state so a restart cannot silently reset the bound; Phase 3 outboxes currently have only minimal publication metadata and do not implement those counters. Serialization/contract defects pause immediately. An unpublished valid domain event belongs in its outbox, not a consumer DLT.
+Each service relay gets at most five attempts for a pending publication: the initial attempt plus four retries after 1, 2, 4, and 8 seconds. On exhaustion it pauses the entire service relay, surfaces the failure, and retains the pending event. It must not skip the failing row, delete publication intent, or manufacture a business rejection. An operator explicitly resumes after remediation. Attempt counts, due times, and paused state are persisted so a restart cannot silently reset the bound. Serialization/contract defects pause immediately. An unpublished valid domain event belongs in its outbox, not a consumer DLT.
 
 ### Consumer processing
 
-Transient technical failures, such as unavailable PostgreSQL, retry the same record in place: one initial attempt plus three retries after 1, 2, and 4 seconds. The partition does not advance during these attempts; other partitions can proceed. This bounded blocking approach avoids extra retry topics and their per-order reordering. The next milestone must ensure the attempt budget survives restart, using durable retry metadata or an equivalent tested recovery design; a restarted listener must not enter an unlimited fresh retry cycle.
+Transient technical failures, such as unavailable PostgreSQL, retry the same record in place: one initial attempt plus three retries after 1, 2, and 4 seconds. The partition does not advance during these attempts; other partitions can proceed. This bounded blocking approach avoids extra retry topics and their per-order reordering. Durable per-record counters preserve the budget across restarts. A metadata outage fails closed without invoking business processing or committing the source offset; operator recovery requires fixing the database and inspecting the retained state.
 
 Malformed JSON, invalid envelopes/payloads, unsupported versions/types/reason codes, inconsistent Kafka keys, and conflicting message or business identities go directly to the consumer's DLT with no futile retries and no business mutation. Exhausted transient failures also go to that DLT. `InventoryRejected` is successful business processing: commit the rejected decision and its outgoing event, then acknowledge normally.
 
@@ -166,7 +166,7 @@ A consumer acknowledges a successfully processed source record only after its da
 
 A crash between DLT publication and source acknowledgment can duplicate a DLT record; diagnose/redrive using source topic/partition/offset. If DLT publication itself fails after the same bounded technical retry budget, pause the affected partition, leave its source offset uncommitted, and surface the failure for explicit operator recovery. Do not silently drop the record or run an infinite DLT loop.
 
-DLT messages have no automatic consumer or republish loop. Redrive is explicit after fixing the cause, preserves event identity and key, and uses the normal idempotent handler. Redrive can be later than subsequent records, so domain-state validation must reject contradictions. Source and DLT retention and deduplication/outbox cleanup windows must be configured together before enabling deletion; Phase 3 performs no event or decision cleanup.
+DLT messages have no automatic consumer or republish loop. Redrive is explicit after fixing the cause, preserves event identity and key, and uses the normal idempotent handler. Redrive can be later than subsequent records, so domain-state validation must reject contradictions. Source and DLT retention and deduplication/outbox cleanup windows must be configured together before enabling deletion; no event or decision cleanup runs.
 
 ## Version evolution
 

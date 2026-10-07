@@ -6,7 +6,7 @@ Warexis is an event-driven Order, Inventory & Fulfillment Platform. Its focus is
 
 Warexis has **independent core domains, REST APIs, and reliable local event foundations**. Order creation atomically persists orders, order lines, and a durable `OrderPlaced` outbox event. Inventory provides stock create/read/update APIs and an internal application use case for atomic reservations, durable duplicate handling, and inventory outcome outbox events. Both services use Flyway migrations, JPA/Hibernate schema validation, Actuator health, and integration tests against real PostgreSQL using Testcontainers. Docker Compose provides local PostgreSQL and Kafka infrastructure. A GitHub Actions workflow verifies both services with Java 21; hosted execution awaits repository publication.
 
-Kafka publishers and listeners, delivery retries, DLT routing, and Order outcome transitions remain planned. Inventory reservations are callable through the internal application layer and verified against PostgreSQL; they are not connected to order creation yet. Orders currently stay in `PENDING_INVENTORY`; creating an order does not contact Inventory or reserve stock. Fulfillment, authentication/security, and a frontend are also future work.
+The opt-in Kafka workflow connects both services through outbox publishers and idempotent listeners, with durable bounded retries, DLT routing, and explicit recovery. Orders start in `PENDING_INVENTORY` and later become `CONFIRMED` or `REJECTED`. Messaging defaults off; independent REST APIs remain available. Fulfillment, authentication/security, and a frontend remain future work.
 
 ## Motivation
 
@@ -14,7 +14,7 @@ Order processing spans independently owned data and operations that can fail at 
 
 ## High-level architecture
 
-The diagram shows the planned business workflow. Kafka infrastructure exists, but the services do not yet publish or consume these events.
+The diagram shows the implemented workflow when Kafka messaging is enabled.
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
     Kafka -->|"Inventory outcome"| Order
 ```
 
-Order creation records a `PENDING_INVENTORY` order and its event in one local transaction. Inventory processing can reserve every requested line or reject the entire reservation in its own local transaction; connecting the two services is the next milestone. The asynchronous outcome will move the order to `CONFIRMED` or `REJECTED`. A successful create request will not imply that inventory has been reserved.
+Order creation records a `PENDING_INVENTORY` order and its event in one local transaction. Inventory processing can reserve every requested line or reject the entire reservation in its own local transaction; Kafka connects the two services when enabled. The asynchronous outcome moves the order to `CONFIRMED` or `REJECTED`. A successful create request will not imply that inventory has been reserved.
 
 | Service | Domain ownership | Responsibility |
 | --- | --- | --- |
@@ -39,21 +39,17 @@ Each service owns its PostgreSQL data. Services must never directly read or modi
 
 ## Technology direction
 
-The service foundations use Java 21, Spring Boot 4.1.1, Maven, Flyway, JPA/Hibernate, and Actuator, with PostgreSQL integration tests using Testcontainers. Local infrastructure uses Docker / Docker Compose, PostgreSQL 18.6, and Apache Kafka 4.2.2. Kafka adapter integration is the next milestone.
+The service foundations use Java 21, Spring Boot 4.1.1, Maven, Flyway, JPA/Hibernate, and Actuator, with PostgreSQL integration tests using Testcontainers. Local infrastructure uses Docker / Docker Compose, PostgreSQL 18.6, and Apache Kafka 4.2.2. Spring Kafka adapters connect the initial Order/Inventory workflow.
 
 GitHub Actions provides service verification. Keycloak, React, TypeScript, Playwright, observability, and local Kubernetes remain later milestones.
 
 ## Testing strategy
 
-Both services have unit tests and real PostgreSQL Testcontainers integration/API tests covering migrations, persistence, request validation, and health. Order verifies order/outbox atomicity. Inventory verifies stock constraints, update locking, all-or-nothing reservations, repeated SKUs, duplicate identities, rollback, and concurrent attempts without overselling. An operational Kafka workflow remains unimplemented.
+Both services have unit tests and real PostgreSQL Testcontainers integration/API tests covering migrations, persistence, request validation, and health. Order verifies order/outbox atomicity. Inventory verifies stock constraints, update locking, all-or-nothing reservations, repeated SKUs, duplicate identities, rollback, and concurrent attempts without overselling. Service Kafka tests and a packaged-service workflow suite exercise real Kafka and PostgreSQL, including poison records, duplicate delivery, durable pause, restart, and recovery.
 
-Additional planned verification includes:
+The [packaged-service workflow suite](tests/workflow/README.md) drives both HTTP APIs through disposable Kafka and independent databases. Run `scripts/verify-workflow.sh` after the individual service suites.
 
-- Tests for event-driven Order lifecycle transitions.
-- Kafka integration and contract tests for event publication, envelope validation, duplicate handling, and ordering assumptions.
-- Workflow tests proving both inventory outcomes, eventual order transitions, and recovery after publication or processing failures.
-
-Workflow tests will need to verify that business changes, consumer deduplication records, and outgoing events commit consistently.
+Workflow tests verify that business changes, consumer deduplication records, and outgoing events commit consistently.
 
 ## Local development direction
 
@@ -78,13 +74,15 @@ Tests require Java 21 and a running Docker Engine. Testcontainers uses disposabl
 - [ADR 0002: Asynchronous Kafka communication](docs/architecture/adr/0002-asynchronous-kafka-communication.md)
 - [ADR 0003: Transactional outbox and idempotent consumers](docs/architecture/adr/0003-transactional-outbox-and-idempotent-consumers.md)
 - [ADR 0004: Capability event streams and bounded delivery](docs/architecture/adr/0004-message-topology-and-delivery-semantics.md)
+- [Kafka workflow startup and recovery](docs/architecture/kafka-workflow.md)
+- [Packaged-service workflow verification](tests/workflow/README.md)
 
 ## Roadmap
 
 1. Service foundations, architecture documentation, and local infrastructure are implemented.
 2. Order creation/read APIs and Inventory stock management/read APIs have service-owned schemas and tests. Service verification CI is defined.
 3. Order and Inventory transactional outboxes, atomic Inventory reservations, and durable Inventory message/business uniqueness are implemented. Version 1 event contracts and delivery topology are documented.
-4. Next, connect Kafka publishers/listeners, implement bounded delivery recovery and Order outcome transitions, and verify the end-to-end workflow and failure paths.
+4. Opt-in Kafka publishers/listeners, bounded durable delivery recovery, Order outcome transitions, and packaged-service workflow verification are implemented.
 5. Introduce Fulfillment and `OrderConfirmed` only after the Order/Inventory workflow is proven.
 6. Introduce authentication, an operational client interface, and observability as their prerequisites become stable.
 7. Evaluate local Kubernetes and provisioning only when they solve a concrete requirement.

@@ -1,6 +1,6 @@
 # ADR 0004: Capability event streams and bounded delivery
 
-Status: Accepted contract and delivery design; Kafka adapters and recovery mechanisms are not implemented yet.
+Status: Accepted. Opt-in Kafka adapters and durable bounded recovery are implemented; automatic redrive and cleanup remain outside scope.
 
 ## Context
 
@@ -14,7 +14,7 @@ Start with three partitions per source and matching three-partition DLTs, retain
 
 Use at-least-once delivery with durable consumer idempotency and business uniqueness. Commit domain data and outgoing events together; publish outbox records only after commit and mark publication only after broker acknowledgment. Acknowledge consumption after the local processing transaction commits.
 
-Use bounded retries in place rather than retry topics. Transient consumer failures get three retries after the first attempt (1, 2, 4 seconds); poison messages go directly to DLT. Confirm DLT publication before acknowledging the source record. A DLT publication failure pauses its partition after bounded retries. The relay gets four retries (1, 2, 4, 8 seconds) and then pauses the entire service relay, retaining all unpublished intent. Restart must not reset either retry bound; durable retry/pause handling is required in the adapter milestone and is absent from Phase 3. Recovery/redrive is explicit, with original identities retained. Business inventory rejection is successful processing, never a technical retry.
+Use bounded retries in place rather than retry topics. Transient consumer failures get three retries after the first attempt (1, 2, 4 seconds); poison messages go directly to DLT. Confirm DLT publication before acknowledging the source record. A DLT publication failure pauses its partition after bounded retries. The relay gets four retries (1, 2, 4, 8 seconds) and then pauses the entire service relay, retaining all unpublished intent. Restart must not reset either retry bound; both services persist retry budgets and paused state. Recovery/redrive is explicit, with original identities retained. Business inventory rejection is successful processing, never a technical retry.
 
 The [event contracts](../event-contracts.md) specify validation, duplicate conflicts, metadata, and recovery in detail. Compatible optional additions retain version 1; breaking changes need a new versioned stream and coordinated rollout. No shared event library or Schema Registry is introduced.
 
@@ -36,4 +36,4 @@ Two capability streams make ownership visible and allow event types to evolve wi
 - Broker acknowledgment followed by database failure can duplicate publication. Database commit followed by offset failure can duplicate consumption. Both are expected and must be tested.
 - Pausing a service relay prevents later events overtaking a failed publication but affects unrelated orders until recovery.
 - Consumer-specific DLTs isolate future subscriptions, at the cost of one extra topic per consuming service. DLTs need diagnosis and explicit recovery rather than automatic loops.
-- Durable retry budgets, paused state, cleanup windows, broker acknowledgment settings, and real Kafka failure tests are implementation obligations for the next milestone. The local outboxes alone do not provide an operational Kafka workflow.
+- Durable retry budgets, paused state, broker acknowledgment settings, and real Kafka/PostgreSQL tests are implemented. Cleanup windows must still be defined before enabling deletion. See [workflow startup and recovery](../kafka-workflow.md).
