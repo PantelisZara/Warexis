@@ -53,8 +53,8 @@ curl -i -X PUT -H 'Content-Type: application/json' \
 
 `InventoryReservationService.process(OrderPlaced)` accepts a validated event ID,
 order ID, and 1 to 100 original lines (`orderLineId`, case-sensitive `sku`, positive
-32-bit `quantity`). Order line IDs must be unique. A future Kafka adapter must
-validate the envelope/type/version before invoking this business use case.
+32-bit `quantity`). Order line IDs must be unique. The Kafka adapter validates
+the envelope/type/version before invoking this business use case.
 
 The transaction locks event identity and then order identity with PostgreSQL
 transaction advisory locks in separate integer namespaces. Hash collisions only
@@ -69,7 +69,7 @@ locks and cannot lower on-hand stock below reserved quantities.
 One transaction covers stock updates, immutable `inventory_reservations`,
 `processed_order_events`, and an `outbox_events` record. The complete version 1
 JSON envelope is stored with metadata and nullable `published_at`; an unpublished
-partial index supports the future relay. Reserved events omit `reasonCode`;
+partial index supports the relay. Reserved events omit `reasonCode`;
 rejected events include `UNKNOWN_SKU` or `INSUFFICIENT_STOCK`. Both preserve the
 original ordered lines, use reservation ID as aggregate ID, order ID as correlation
 ID, and the first accepted input event ID as causation ID. See the
@@ -96,7 +96,8 @@ as `warexis.inventory.order-events.v1` and publishes committed decisions to
 UUID. The transport uses raw bytes with strict UTF-8/JSON validation, so malformed
 UTF-8, duplicate JSON fields, trailing JSON, unsupported types/versions, bad keys,
 and conflicting immutable identities cannot mutate stock. Compatible optional
-fields are accepted. Business rejection commits normally and is acknowledged.
+fields are accepted. Business rejection commits normally and is acknowledged;
+its single successful processing claim consumes no additional technical retries.
 
 The listener acknowledges only after the reservation transaction commits and
 its durable delivery checkpoint is recorded. Transient processing failures get
@@ -155,3 +156,20 @@ Tests run domain checks and HTTP/persistence integration against disposable
 PostgreSQL 18.6 Testcontainers, including schema constraints, atomic reservation/outbox rollback, idempotency,
 concurrent duplicate/order races, oversell prevention, and deterministic row-lock
 behavior. They do not use the persistent local-development database.
+
+Phase 5 hardening repeatedly synchronizes 36 orders competing for ten units,
+30 orders with overlapping and reversed case-sensitive SKU inputs, and 24
+concurrent copies or same-order event aliases. Database assertions reconcile
+reserved stock with committed successful reservation lines and verify one
+decision/outbox per order. Test-only PostgreSQL triggers fail the second stock
+update or reservation, processed-event, and outbox inserts; every boundary
+rolls back the complete local transaction and the same input can then recover.
+These tests prove local atomicity and duplicate tolerance, not distributed
+exactly-once delivery.
+
+Failure diagnostics contain validated event/type/order identities, source
+coordinates, retry counts, state and classification. Poison identities are
+reported as unavailable, with source coordinates identifying the record. Raw
+keys, payloads and exception messages are not logged. The outbox partial
+`(occurred_at, event_id)` unpublished index matches its head polling order;
+no additional index or scaling mechanism is introduced.

@@ -41,18 +41,23 @@ public class InventoryOrderListener {
     @KafkaListener(id = "inventory-orders", topics = "warexis.order.events.v1", groupId = ConsumerDeliveryStore.GROUP,
             containerFactory = "inventoryKafkaListenerContainerFactory")
     public void receive(ConsumerRecord<byte[], byte[]> record, Acknowledgment acknowledgment, Consumer<?, ?> consumer) {
+        int processingAttempt = 0;
+        int dltAttempt = 0;
         try {
             while (true) {
                 var state = delivery.load(record);
+                processingAttempt = state.processingAttempts();
+                dltAttempt = state.dltAttempts();
                 if (state.phase().equals("COMPLETE")) { acknowledgment.acknowledge(); return; }
                 if (state.phase().equals("PAUSED")) { pause(record, consumer); return; }
                 if (state.phase().equals("DLT")) {
                     if (state.dltAttempts() >= 4) {
-                        delivery.transition(record, "PAUSED", "DLT_UNAVAILABLE");
+                        if (delivery.transition(record, "PAUSED", "DLT_UNAVAILABLE")) diagnostic(record, processingAttempt, dltAttempt, "PAUSED", "DLT_UNAVAILABLE");
                         continue;
                     }
                     await(state.nextAttemptAt());
                     if (!delivery.beginAttempt(record, state, true)) continue;
+                    dltAttempt++;
                     try {
                         var quarantined = new ProducerRecord<byte[], byte[]>(DLT, record.partition(), record.key(), record.value());
                         header(quarantined, "warexis-source-topic", record.topic());
@@ -64,8 +69,15 @@ public class InventoryOrderListener {
                         header(quarantined, "warexis-dlt-attempts", Integer.toString(state.dltAttempts() + 1));
                         header(quarantined, "warexis-failed-at", Instant.now().toString());
                         kafka.send(quarantined).get(11, TimeUnit.SECONDS);
+                        diagnostic(record, processingAttempt, dltAttempt, "DLT_ACKNOWLEDGED", state.failureCode());
                     } catch (Exception exception) {
-                        if (exception instanceof InterruptedException) { Thread.currentThread().interrupt(); pause(record, consumer); return; }
+                        diagnostic(record, processingAttempt, dltAttempt, "DLT_RETRY", "BROKER_UNAVAILABLE");
+                        if (exception instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                            pause(record, consumer);
+                            diagnostic(record, processingAttempt, dltAttempt, "PAUSED", "INTERRUPTED");
+                            return;
+                        }
                         continue;
                     }
                     delivery.transition(record, "COMPLETE", state.failureCode());
@@ -73,20 +85,28 @@ public class InventoryOrderListener {
                 }
                 WorkflowEventValidator.Validated event;
                 try { event = validator.validate(record.key(), record.value()); }
-                catch (InvalidEventException exception) { delivery.transition(record, "DLT", "INVALID_CONTRACT"); continue; }
+                catch (InvalidEventException exception) {
+                    if (delivery.transition(record, "DLT", "INVALID_CONTRACT")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "INVALID_CONTRACT");
+                    continue;
+                }
                 if (!event.eventType().equals("OrderPlaced")) {
                     delivery.transition(record, "COMPLETE", null);
                     continue;
                 }
-                if (state.processingAttempts() >= 4) { delivery.transition(record, "DLT", "RETRY_EXHAUSTED"); continue; }
+                if (state.processingAttempts() >= 4) {
+                    if (delivery.transition(record, "DLT", "RETRY_EXHAUSTED")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "RETRY_EXHAUSTED");
+                    continue;
+                }
                 await(state.nextAttemptAt());
                 if (!delivery.beginAttempt(record, state, false)) continue;
+                processingAttempt++;
                 try {
                     reservations.process(event.order());
                 } catch (ConflictingOrderPlacedException exception) {
-                    delivery.transition(record, "DLT", "IDENTITY_CONFLICT");
+                    if (delivery.transition(record, "DLT", "IDENTITY_CONFLICT")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "IDENTITY_CONFLICT");
                     continue;
                 } catch (RuntimeException exception) {
+                    diagnostic(record, processingAttempt, dltAttempt, "PROCESS_RETRY", "TECHNICAL_FAILURE");
                     continue;
                 }
                 delivery.transition(record, "COMPLETE", null);
@@ -95,11 +115,24 @@ public class InventoryOrderListener {
             }
         } catch (RuntimeException exception) {
             pause(record, consumer);
-            log.error("Inventory consumer paused: delivery metadata or offset confirmation unavailable.");
+            diagnostic(record, processingAttempt, dltAttempt, "PAUSED", "METADATA_OR_ACK_UNAVAILABLE");
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             pause(record, consumer);
+            diagnostic(record, processingAttempt, dltAttempt, "PAUSED", "INTERRUPTED");
         }
+    }
+
+    /** Log only fully validated identities and fixed classifications, never payloads, keys, or exception messages. */
+    private void diagnostic(ConsumerRecord<byte[], byte[]> record, int processAttempt, int dltAttempt,
+                            String action, String code) {
+        WorkflowEventValidator.Validated event = null;
+        try { event = validator.validate(record.key(), record.value()); }
+        catch (InvalidEventException ignored) { /* Poison has no trusted event identity; source coordinates identify it. */ }
+        log.warn("Inventory delivery eventId={} eventType={} orderId={} topic={} partition={} offset={} processingAttempt={} dltAttempt={} state={} classification={}",
+                event == null ? null : event.order().eventId(), event == null ? null : event.eventType(),
+                event == null ? null : event.order().orderId(), record.topic(), record.partition(), record.offset(),
+                processAttempt, dltAttempt, action, code);
     }
 
     private void pause(ConsumerRecord<byte[], byte[]> record, Consumer<?, ?> consumer) {
