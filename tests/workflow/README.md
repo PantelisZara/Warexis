@@ -35,8 +35,34 @@ insufficient/unknown stock rejection, concurrent competing orders, duplicate
 records in both directions, and malformed/version/key/UTF-8/trailing-token/
 duplicate-property poison records. DLT checks preserve bytes, key, source
 partition and source identity/group headers, confirm source offset progress,
-and verify no domain mutation. A broker outage proves durable publication pause,
-unchanged event identity across a service restart, and explicit operator recovery.
+and verify no domain mutation. The suite has 28 cases, including both service
+directions for these recovery boundaries:
+
+- A committed pending outbox survives forced JVM termination and publishes the
+  same stored envelope after restart.
+- A consumer whose business transaction committed but whose delivery checkpoint
+  failed leaves the source offset uncommitted. After forced termination and
+  restart, replay completes without another reservation, decision or outbox.
+- An unavailable owned database leaves the observed source offset uncommitted;
+  restoring that database and restarting the affected service completes delivery.
+- Four real failed DLT sends exhaust the durable budget and pause one partition.
+  At least three distinct later order IDs on that partition remain undecided,
+  while another partition progresses before and after process restart. Explicit
+  recovery releases the blocked record and all later offsets. A further restart
+  and a new record on the recovered partition prove terminal DLT state is retained.
+
+A broker outage separately proves durable publication pause, unchanged event
+identity across an Order process restart, and explicit operator recovery. SQL
+triggers and DLT message-size limits inject failures only into disposable test
+resources. Service logs reset once per suite run and append across that run's
+restarts, so old diagnostics cannot satisfy assertions. Checks require safe
+identity/source/retry fields and reject the unsafe poison marker in either log.
+
+Run the service suites as well: they exercise conflicting outcomes, bounded
+processing failures, publication acknowledgment/checkpoint boundaries, repeated
+heavy reservation contention, concurrent duplicate event IDs and same-order
+aliases, deterministic multi-SKU locking, and every local persistence rollback
+boundary. The packaged suite does not replace those checks.
 
 Tests provision three partitions for each source/DLT stream and use independent
 consumer groups for observation. Every created JVM/container is owned by this
