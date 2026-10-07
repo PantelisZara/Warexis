@@ -1,6 +1,6 @@
 # Initial domain model
 
-Order, OrderLine, StockItem, and InventoryReservation are implemented with service-owned Flyway schemas and UUID identifiers. Both services persist outgoing events in local transactional outboxes; Inventory also persists processed event identities. Order transitions driven by Kafka remain planned. API details are documented in each service guide.
+Order, OrderLine, StockItem, and InventoryReservation are implemented with service-owned Flyway schemas and UUID identifiers. Both services persist outgoing events in local transactional outboxes; Inventory also persists processed event identities. Order outcomes driven by opt-in Kafka messaging atomically persist the terminal transition and duplicate-delivery identities. API details are documented in each service guide.
 
 ## Order Service
 
@@ -20,7 +20,7 @@ stateDiagram-v2
 
 `CONFIRMED` means inventory was reserved. It does not mean payment, shipment, or fulfillment occurred. `REJECTED` means inventory could not be reserved. These are terminal outcomes for the initial workflow; cancellation, replacement orders, and future fulfillment states require later design.
 
-Repeated outcome deliveries must not repeat a transition. An outcome that conflicts with the recorded decision must not overwrite it silently; handling that inconsistency is an implementation requirement.
+Repeated outcome deliveries must not repeat a transition. An outcome that conflicts with the recorded decision must not overwrite it silently; the outcome handler quarantines such inconsistent input.
 
 ## Inventory Service
 
@@ -42,6 +42,6 @@ Reservation lines retain the original requested SKU, quantity, and source order-
 
 Stock invariants and SKU uniqueness are enforced by PostgreSQL constraints. Stock updates and reservations use database row locks. Reservation demand aggregates repeated SKUs using a wide integer, then locks stock rows in deterministic SKU order before checking availability. A single transaction persists the decision, any stock changes, processed event identity, and exactly one outcome outbox event. Real PostgreSQL tests cover atomicity and concurrent attempts.
 
-Message uniqueness by `eventId` and business uniqueness by `orderId` are separate. The same event identity with the same original input returns the existing decision; changed input under that identity is a conflict. A new event identity for the same order and identical ordered lines records the delivery but reuses its original decision and outgoing event. A conflicting line list cannot obtain another decision. See the [event contracts](event-contracts.md) for exact identity rules and the future adapter quarantine policy.
+Message uniqueness by `eventId` and business uniqueness by `orderId` are separate. The same event identity with the same original input returns the existing decision; changed input under that identity is a conflict. A new event identity for the same order and identical ordered lines records the delivery but reuses its original decision and outgoing event. A conflicting line list cannot obtain another decision. See the [event contracts](event-contracts.md) for exact identity rules and the adapter quarantine policy.
 
 Stock create/read/update APIs are implemented. Stock release, reservation expiry, and fulfillment deductions remain future work. See the [event contracts](event-contracts.md) for the messages connecting these domains.

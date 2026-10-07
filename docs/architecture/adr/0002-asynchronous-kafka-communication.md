@@ -1,6 +1,6 @@
 # ADR 0002: Asynchronous Kafka communication
 
-Status: Accepted architectural direction; messaging workflow implementation is a later milestone.
+Status: Accepted. The opt-in Order/Inventory Kafka workflow is implemented.
 
 ## Context
 
@@ -22,5 +22,5 @@ Asynchronous communication represents the business process explicitly and lets e
 - Duplicates, delays, and processing failures are normal conditions to test.
 - Kafka adds broker operation and consumer-management requirements.
 - Ordering applies within a topic partition, not across topics. The key alone does not guarantee producer publication or consumer processing order.
-- Local Kafka infrastructure is available: Apache Kafka 4.2.2 in a single-node KRaft development setup. Producers, consumers, event publication, and event processing remain planned; the business workflow is not operational.
+- Local Kafka infrastructure is available: Apache Kafka 4.2.2 in a single-node KRaft development setup. Outbox publishers and idempotent consumers connect the Order/Inventory business workflow when messaging is enabled.
 - Capability topic topology, partitioning, groups, bounded retries, and DLT recovery are specified in [ADR 0004](0004-message-topology-and-delivery-semantics.md). Retention must align with the supported replay and cleanup window before enabling deletion.

@@ -32,7 +32,7 @@ Changing `KAFKA_HOST_PORT` also updates the advertised host endpoint.
 All three services use the `warexis-local_local` bridge network and restart unless
 explicitly stopped. They start independently because none depends on another.
 PostgreSQL health checks use `pg_isready` over TCP; Kafka's health check lists
-topics through the internal broker listener. Future application containers should
+topics through the internal broker listener. Application containers should
 wait for their required infrastructure services to be healthy.
 
 Persistent named volumes under the default `warexis-local` project name:
@@ -92,6 +92,8 @@ Start Order Service on HTTP port 8081:
 (
   . ./.env.example
   cd services/order-service || exit
+  WAREXIS_MESSAGING_ENABLED=true \
+  KAFKA_BOOTSTRAP_SERVERS="127.0.0.1:${KAFKA_HOST_PORT}" \
   SERVER_ADDRESS=127.0.0.1 \
   SERVER_PORT=8081 \
   ORDER_DB_URL='jdbc:postgresql://127.0.0.1:15432/warexis_order' \
@@ -107,6 +109,8 @@ Start Inventory Service on HTTP port 8082:
 (
   . ./.env.example
   cd services/inventory-service || exit
+  WAREXIS_MESSAGING_ENABLED=true \
+  KAFKA_BOOTSTRAP_SERVERS="127.0.0.1:${KAFKA_HOST_PORT}" \
   SERVER_ADDRESS=127.0.0.1 \
   SERVER_PORT=8082 \
   INVENTORY_DB_URL='jdbc:postgresql://127.0.0.1:15433/warexis_inventory' \
@@ -121,4 +125,10 @@ After both services have started, their local health endpoints are:
 - Order: <http://127.0.0.1:8081/actuator/health>
 - Inventory: <http://127.0.0.1:8082/actuator/health>
 
-Kafka remains available to host clients at `127.0.0.1:19092`.
+These recipes enable the Kafka workflow explicitly. Set
+`WAREXIS_MESSAGING_ENABLED=false` to run independent REST APIs without messaging.
+Kafka remains available to host clients at `127.0.0.1:19092` with the example port.
+Creating an order returns `PENDING_INVENTORY`; poll its read endpoint for eventual
+`CONFIRMED` or `REJECTED`. Use the stock API to seed synthetic local stock first.
+See [workflow startup and explicit failure recovery](../../docs/architecture/kafka-workflow.md)
+and [disposable packaged-service verification](../../tests/workflow/README.md).
