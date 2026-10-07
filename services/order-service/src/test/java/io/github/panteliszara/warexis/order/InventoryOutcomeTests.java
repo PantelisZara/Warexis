@@ -49,8 +49,16 @@ class InventoryOutcomeTests {
     @Test
     void rejectsBusinessOutcomeWithoutTechnicalFailure() {
         var order=create();
-        outcomes.apply(result(order,"InventoryRejected","INSUFFICIENT_STOCK"));
-        assertThat(orders.get(order.id()).status()).isEqualTo(OrderStatus.REJECTED);
+        var rejected=result(order,"InventoryRejected","INSUFFICIENT_STOCK");
+        outcomes.apply(rejected);
+        var terminal=orders.get(order.id());
+        outcomes.apply(rejected);
+        outcomes.apply(new InventoryOutcome(UUID.randomUUID(),rejected.eventType(),rejected.occurredAt(),rejected.aggregateId(),
+                rejected.correlationId(),rejected.causationId(),rejected.orderId(),rejected.reservationId(),rejected.lines(),rejected.reasonCode()));
+        assertThat(terminal.status()).isEqualTo(OrderStatus.REJECTED);
+        assertThat(orders.get(order.id())).isEqualTo(terminal);
+        assertThat(jdbc.sql("SELECT count(*) FROM inventory_decisions WHERE order_id=:id").param("id",order.id()).query(Long.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count(*) FROM processed_inventory_events WHERE order_id=:id").param("id",order.id()).query(Long.class).single()).isEqualTo(2);
     }
 
     @Test

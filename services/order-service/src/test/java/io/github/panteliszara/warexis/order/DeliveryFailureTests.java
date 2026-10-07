@@ -176,6 +176,39 @@ class DeliveryFailureTests {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans={false,true})
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    @SuppressWarnings("unchecked")
+    void acknowledgmentFailureAfterCompleteLogsThePersistedBusinessOrDltAttempt(boolean quarantined,
+            org.springframework.boot.test.system.CapturedOutput output) {
+        var record=new ConsumerRecord<byte[],byte[]>(KafkaConfiguration.INVENTORY_TOPIC,1,
+                quarantined?900000021L:900000020L,new byte[]{1},new byte[]{2});
+        deliveries.load(record);
+        int processingAttempts=quarantined?4:3;
+        int dltAttempts=quarantined?2:0;
+        jdbc.sql("UPDATE messaging_deliveries SET phase='COMPLETE',processing_attempts=:processing,dlt_attempts=:dlt WHERE source_offset=:offset")
+                .param("processing",processingAttempts).param("dlt",dltAttempts).param("offset",record.offset()).update();
+        var kafka=(KafkaTemplate<byte[],byte[]>)mock(KafkaTemplate.class);
+        var business=mock(InventoryOutcomeService.class);
+        var ack=mock(Acknowledgment.class);
+        var unsafe="UNSAFE-ACK-EXCEPTION-DETAIL";
+        doThrow(new KafkaException(unsafe)).when(ack).acknowledge();
+        var consumer=(Consumer<byte[],byte[]>)mock(Consumer.class);
+        new InventoryOutcomeListener(business,deliveries,kafka,mock(KafkaListenerEndpointRegistry.class))
+                .receive(record,ack,consumer);
+        verify(ack).acknowledge();
+        verifyNoInteractions(business,kafka);
+        verify(consumer).seek(new TopicPartition(record.topic(),record.partition()),record.offset());
+        var persisted=deliveries.load(record);
+        assertThat(persisted.phase()).isEqualTo("COMPLETE");
+        assertThat(persisted.processingAttempts()).isEqualTo(processingAttempts);
+        assertThat(persisted.dltAttempts()).isEqualTo(dltAttempts);
+        int expectedAttempt=quarantined?dltAttempts:processingAttempts;
+        assertThat(output.getAll()).contains("state=PAUSED, attempt="+expectedAttempt+", partition=1, offset="+record.offset())
+                .doesNotContain(unsafe);
+    }
+
     private void rejectCompletion(boolean suppressUpdate) {
         if (suppressUpdate) {
             jdbc.sql("CREATE FUNCTION suppress_completion() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN IF NEW.phase=''COMPLETE'' THEN RETURN NULL; END IF; RETURN NEW; END'").update();

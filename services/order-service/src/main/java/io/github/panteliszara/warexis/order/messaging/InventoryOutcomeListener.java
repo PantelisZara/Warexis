@@ -35,9 +35,14 @@ public class InventoryOutcomeListener {
 
     @KafkaListener(id="order-inventory", topics=KafkaConfiguration.INVENTORY_TOPIC, groupId=KafkaConfiguration.GROUP)
     public void receive(ConsumerRecord<byte[], byte[]> record, Acknowledgment ack, Consumer<byte[], byte[]> consumer) {
+        InventoryOutcome outcome = null;
+        int attempt = 0;
         try {
             while (true) {
                 var state = deliveries.load(record);
+                attempt = state.phase().equals("PROCESS")
+                        || state.phase().equals("COMPLETE") && state.dltAttempts() == 0
+                        ? state.processingAttempts() : state.dltAttempts();
                 if (state.phase().equals("COMPLETE")) {
                     ack.acknowledge();
                     return;
@@ -52,6 +57,7 @@ public class InventoryOutcomeListener {
                 }
                 if (state.phase().equals("DLT") && state.dltAttempts() >= 4) {
                     if (deliveries.pause(record)) {
+                        logOutcome("PAUSED", state.dltAttempts(), outcome, record);
                         pause(record, consumer);
                         return;
                     }
@@ -66,19 +72,22 @@ public class InventoryOutcomeListener {
                 if (!deliveries.begin(record, state)) {
                     continue;
                 }
+                attempt++;
                 if (state.phase().equals("PROCESS")) {
                     try {
-                        var outcome = EventJson.outcome(record.key(), record.value());
+                        outcome = EventJson.outcome(record.key(), record.value());
                         outcomes.apply(outcome);
                     } catch (PoisonMessageException ex) {
+                        logOutcome("DLT", state.processingAttempts() + 1, outcome, record);
                         deliveries.toDlt(record, "INVALID_OR_CONFLICTING");
                         continue;
                     } catch (Exception ex) {
-                        LOG.warn("Order inventory processing failed; partition={}, offset={}", record.partition(), record.offset());
+                        logOutcome("PROCESS_RETRY", state.processingAttempts() + 1, outcome, record);
                         continue;
                     }
                     // A completion-metadata failure must escape to fail-closed pause, not spend another business attempt.
                     deliveries.complete(record);
+                    logOutcome("COMPLETE", state.processingAttempts() + 1, outcome, record);
                 } else {
                     var dlt = new ProducerRecord<byte[], byte[]>(KafkaConfiguration.DLT, record.partition(), record.key(), record.value());
                     header(dlt, "warexis-source-topic", record.topic());
@@ -94,17 +103,19 @@ public class InventoryOutcomeListener {
                     } catch (InterruptedException ex) {
                         throw ex;
                     } catch (Exception ex) {
-                        LOG.warn("Order DLT publication failed; partition={}, offset={}", record.partition(), record.offset());
+                        logOutcome("DLT_RETRY", state.dltAttempts() + 1, outcome, record);
                         continue;
                     }
                     // The broker acknowledged; failure to checkpoint that fact must pause without another send.
                     deliveries.complete(record);
+                    logOutcome("DLT_COMPLETE", state.dltAttempts() + 1, outcome, record);
                 }
             }
         } catch (Exception ex) {
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
+            logOutcome("PAUSED", attempt, outcome, record);
             // Fail closed if retry persistence or source acknowledgment is unavailable.
             pause(record, consumer);
         }
@@ -118,6 +129,14 @@ public class InventoryOutcomeListener {
             container.pausePartition(partition);
         }
         LOG.error("Order inventory partition paused; partition={}, offset={}", record.partition(), record.offset());
+    }
+
+    private void logOutcome(String state, int attempt, InventoryOutcome outcome, ConsumerRecord<byte[], byte[]> record) {
+        // Only fully validated typed identities are logged; malformed transport uses source coordinates.
+        LOG.atLevel(state.equals("COMPLETE") || state.equals("DLT_COMPLETE")
+                ? org.slf4j.event.Level.INFO : org.slf4j.event.Level.WARN).log("Order inventory delivery; eventId={}, eventType={}, orderId={}, state={}, attempt={}, partition={}, offset={}",
+                outcome == null ? null : outcome.eventId(), outcome == null ? null : outcome.eventType(),
+                outcome == null ? null : outcome.orderId(), state, attempt, record.partition(), record.offset());
     }
 
     private void header(ProducerRecord<byte[], byte[]> record, String key, String value) {

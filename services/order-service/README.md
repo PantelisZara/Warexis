@@ -95,7 +95,7 @@ repeated SKUs; no persistence entities are serialized.
 The event ID is unique. An additional aggregate/type/version constraint prevents
 a second `OrderPlaced` v1 event for the same order. PostgreSQL checks envelope
 metadata consistency and enforces an aggregate foreign key. `published_at` is
-initially null, with a partial `(occurred_at, event_id)` index for future polling
+initially null, with a partial `(occurred_at, event_id)` index for polling
 of unpublished rows. The relay reuses the persisted envelope and event ID,
 since acknowledgment followed by a database failure can duplicate delivery.
 
@@ -120,7 +120,11 @@ match. The transactional outcome handler row-locks the order and durably records
 message identity and one inventory decision per order. A new event ID is a safe
 alias only when all known decision metadata, including occurrence timestamp,
 reservation ID, causation and ordered lines, matches. Conflicts preserve the
-original terminal status and go to DLT. No Fulfillment event is emitted.
+original terminal status and go to DLT, in either direction (`CONFIRMED` followed
+by rejection, or `REJECTED` followed by reservation). A structurally valid outcome
+for an unknown order also goes directly to DLT, without futile technical retries.
+Identical rejected outcomes and matching aliases are idempotent, like successful
+reservation outcomes. No Fulfillment event is emitted.
 
 The relay acquires a dedicated PostgreSQL session advisory lock so only one
 replica publishes at a time, takes the oldest unpublished `(occurred_at,event_id)`
@@ -148,6 +152,13 @@ positions, and retry metadata failure seeks/pauses without invoking business
 processing. Other partitions can continue. Unexpected container errors stop the
 container rather than using a second framework recovery loop. Duplicate source
 or DLT delivery remains possible, and business/message idempotency handles it.
+
+Delivery diagnostics include validated event ID/type/order ID when available,
+state, attempt count, and source partition/offset. Malformed records use source
+coordinates without logging their raw key or payload. Relay diagnostics retain
+the stored event/order identity and publication attempt. Local tests verify
+competing relay instances cannot overtake an unacknowledged head event; the
+session lock is the coordination boundary, rather than an in-memory flag.
 
 `WAREXIS_MESSAGING_RETRY_BASE_DELAY` defaults to `1s` and
 `WAREXIS_MESSAGING_POLL_INTERVAL` to `250ms`. Test configurations use shorter

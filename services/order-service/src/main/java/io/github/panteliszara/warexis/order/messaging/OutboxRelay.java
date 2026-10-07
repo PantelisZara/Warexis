@@ -60,7 +60,7 @@ public class OutboxRelay {
                 }
                 var event = pending.get();
                 if (event.attempts() >= 5) {
-                    pause("RETRY_EXHAUSTED");
+                    pause("RETRY_EXHAUSTED", event, event.attempts());
                     return;
                 }
                 if (event.nextAt() != null && event.nextAt().toInstant().isAfter(Instant.now())) {
@@ -71,7 +71,7 @@ public class OutboxRelay {
                 try {
                     EventJson.orderPlaced(key, body);
                 } catch (PoisonMessageException ex) {
-                    pause("INVALID_EVENT");
+                    pause("INVALID_EVENT", event, event.attempts());
                     return;
                 }
                 transaction.executeWithoutResult(status -> requireOne(jdbc.sql("""
@@ -90,9 +90,10 @@ public class OutboxRelay {
                         Thread.currentThread().interrupt();
                     }
                     if (event.attempts() + 1 >= 5) {
-                        pause("RETRY_EXHAUSTED");
+                        pause("RETRY_EXHAUSTED", event, event.attempts() + 1);
                     }
-                    LOG.warn("Order relay publication remains pending; eventId={}", event.id());
+                    LOG.warn("Order relay publication remains pending; eventId={}, eventType=OrderPlaced, orderId={}, state=PENDING, attempt={}",
+                            event.id(), event.orderId(), event.attempts() + 1);
                 }
             } finally {
                 try {
@@ -114,10 +115,11 @@ public class OutboxRelay {
         }
     }
 
-    private void pause(String classification) {
+    private void pause(String classification, Pending event, int attempt) {
         jdbc.sql("UPDATE messaging_relay_control SET paused = TRUE, failure_classification = :classification WHERE id = 1")
                 .param("classification", classification).update();
-        LOG.error("Order relay paused; classification={}", classification);
+        LOG.error("Order relay paused; eventId={}, eventType=OrderPlaced, orderId={}, state=PAUSED, attempt={}, classification={}",
+                event.id(), event.orderId(), attempt, classification);
     }
 
     private record Pending(UUID id, UUID orderId, String json, int attempts, Timestamp nextAt) {

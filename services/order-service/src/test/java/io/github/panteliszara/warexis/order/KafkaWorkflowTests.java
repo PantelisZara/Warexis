@@ -42,6 +42,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @Testcontainers
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties={"warexis.messaging.enabled=true","warexis.messaging.retry-base-delay=10ms","warexis.messaging.poll-interval=50ms"})
@@ -82,16 +83,20 @@ class KafkaWorkflowTests {
         var sent=kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(confirmed.id().toString()),bytes(json)).get(10,TimeUnit.SECONDS);
         await(()->orders.get(confirmed.id()).status()==OrderStatus.CONFIRMED);
         var terminal=orders.get(confirmed.id());
-        kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(confirmed.id().toString()),bytes(json)).get(10,TimeUnit.SECONDS);
-        await(()->jdbc.sql("SELECT count(*) FROM messaging_deliveries WHERE source_topic=:topic AND source_partition=:partition AND source_offset>=:offset AND phase='COMPLETE'")
-                .param("topic",KafkaConfiguration.INVENTORY_TOPIC).param("partition",sent.getRecordMetadata().partition())
-                .param("offset",sent.getRecordMetadata().offset()).query(Long.class).single()>=2);
+        var duplicate=kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(confirmed.id().toString()),bytes(json)).get(10,TimeUnit.SECONDS);
+        awaitComplete(duplicate.getRecordMetadata());
         assertThat(orders.get(confirmed.id())).isEqualTo(terminal);
         assertThat(jdbc.sql("SELECT count(*) FROM processed_inventory_events WHERE order_id=:id").param("id",confirmed.id()).query(Long.class).single()).isEqualTo(1);
         var rejected=create();
-        kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(rejected.id().toString()),bytes(outcome(rejected,"InventoryRejected","UNKNOWN_SKU")))
-                .get(10,TimeUnit.SECONDS);
+        var rejection=outcome(rejected,"InventoryRejected","UNKNOWN_SKU");
+        kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(rejected.id().toString()),bytes(rejection)).get(10,TimeUnit.SECONDS);
         await(()->orders.get(rejected.id()).status()==OrderStatus.REJECTED);
+        var rejectedTerminal=orders.get(rejected.id());
+        var repeated=kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(rejected.id().toString()),bytes(rejection)).get(10,TimeUnit.SECONDS);
+        awaitComplete(repeated.getRecordMetadata());
+        assertThat(orders.get(rejected.id())).isEqualTo(rejectedTerminal);
+        assertThat(jdbc.sql("SELECT count(*) FROM inventory_decisions WHERE order_id=:id").param("id",rejected.id()).query(Long.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT count(*) FROM processed_inventory_events WHERE order_id=:id").param("id",rejected.id()).query(Long.class).single()).isEqualTo(1);
     }
 
     @Test @Order(3)
@@ -136,7 +141,7 @@ class KafkaWorkflowTests {
     }
 
     @Test @Order(5)
-    void acknowledgmentThenDatabaseFailureReplaysIdenticalEventAndDurablyPausesAtFiveAttempts() throws Exception {
+    void acknowledgmentThenDatabaseFailureReplaysIdenticalEventAndDurablyPausesAtFiveAttempts(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
         await(()->jdbc.sql("SELECT count(*) FROM outbox_events WHERE published_at IS NULL").query(Long.class).single()==0);
         jdbc.sql("ALTER TABLE outbox_events ADD CONSTRAINT reject_publication_mark CHECK(published_at IS NULL) NOT VALID").update();
         var order=create();
@@ -145,6 +150,7 @@ class KafkaWorkflowTests {
             await(()->jdbc.sql("SELECT paused FROM messaging_relay_control WHERE id=1").query(Boolean.class).single());
             assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id").param("id",order.id()).query(Integer.class).single()).isEqualTo(5);
             assertThat(published(order)).isFalse();
+            assertThat(output.getOut()).contains("state=PAUSED, attempt=5, classification=RETRY_EXHAUSTED");
             try(var consumer=consumer(KafkaConfiguration.ORDER_TOPIC)) {
                 int repeats=0;
                 var deadline=Instant.now().plusSeconds(15);
@@ -213,6 +219,70 @@ class KafkaWorkflowTests {
             container.start();
         }
         await(()->orders.get(later.id()).status()==OrderStatus.CONFIRMED);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"CONFIRMED","REJECTED","UNKNOWN"})
+    @Order(7)
+    void conflictingTerminalAndUnknownOrderOutcomesAreQuarantinedWithoutRetryOrMutation(String initial, org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        var order=create();
+        var source=outcome(order,initial.equals("REJECTED")?"InventoryRejected":"InventoryReserved",
+                initial.equals("REJECTED")?"INSUFFICIENT_STOCK":null);
+        if(!initial.equals("UNKNOWN")) {
+            kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(order.id().toString()),bytes(source)).get(10,TimeUnit.SECONDS);
+            await(()->orders.get(order.id()).status().name().equals(initial));
+        }
+        var terminal=orders.get(order.id());
+        var incoming=(tools.jackson.databind.node.ObjectNode)mapper.readTree(source);
+        incoming.put("eventId",UUID.randomUUID().toString());
+        incoming.put("untrustedDiagnostic","UNSAFE_PAYLOAD_MARKER\nFORGED_LOG_LINE");
+        var id=order.id();
+        if(initial.equals("UNKNOWN")) {
+            id=UUID.randomUUID();
+            incoming.put("correlationId",id.toString());
+            ((tools.jackson.databind.node.ObjectNode)incoming.path("payload")).put("orderId",id.toString());
+        } else if(initial.equals("CONFIRMED")) {
+            incoming.put("eventType","InventoryRejected");
+            ((tools.jackson.databind.node.ObjectNode)incoming.path("payload")).put("reasonCode","INSUFFICIENT_STOCK");
+        } else {
+            incoming.put("eventType","InventoryReserved");
+            ((tools.jackson.databind.node.ObjectNode)incoming.path("payload")).remove("reasonCode");
+        }
+        var body=bytes(mapper.writeValueAsString(incoming));
+        var key=bytes(id.toString());
+        var record=kafka.send(new ProducerRecord<byte[],byte[]>(KafkaConfiguration.INVENTORY_TOPIC,1,key,body))
+                .get(10,TimeUnit.SECONDS).getRecordMetadata();
+        try(var consumer=consumer(KafkaConfiguration.DLT)) {
+            var dlt=find(consumer,key);
+            assertThat(dlt.value()).isEqualTo(body);
+            assertThat(dlt.partition()).isEqualTo(record.partition());
+            assertThat(new String(dlt.headers().lastHeader("warexis-source-offset").value(),StandardCharsets.UTF_8)).isEqualTo(Long.toString(record.offset()));
+            assertThat(new String(dlt.headers().lastHeader("warexis-processing-attempts").value(),StandardCharsets.UTF_8)).isEqualTo("1");
+            assertThat(new String(dlt.headers().lastHeader("warexis-failure-code").value(),StandardCharsets.UTF_8)).isEqualTo("INVALID_OR_CONFLICTING");
+        }
+        awaitComplete(record);
+        assertThat(output.getOut()).contains("eventId="+incoming.path("eventId").asString(),
+                "eventType="+incoming.path("eventType").asString(),"orderId="+id,"state=DLT", "attempt=1");
+        assertThat(output.getAll()).doesNotContain("UNSAFE_PAYLOAD_MARKER","FORGED_LOG_LINE");
+        try(var admin=org.apache.kafka.clients.admin.AdminClient.create(Map.of("bootstrap.servers",broker.getBootstrapServers()))) {
+            await(()->{
+                try {
+                    var offset=admin.listConsumerGroupOffsets(KafkaConfiguration.GROUP).partitionsToOffsetAndMetadata()
+                            .get(5,TimeUnit.SECONDS).get(new org.apache.kafka.common.TopicPartition(record.topic(),record.partition()));
+                    return offset!=null && offset.offset()>record.offset();
+                } catch(Exception ex) { return false; }
+            });
+        }
+        assertThat(orders.get(order.id())).isEqualTo(terminal);
+        assertThat(jdbc.sql("SELECT count(*) FROM processed_inventory_events WHERE event_id=:id")
+                .param("id",UUID.fromString(incoming.path("eventId").asString())).query(Long.class).single()).isZero();
+        assertThat(jdbc.sql("SELECT count(*) FROM inventory_decisions WHERE order_id=:id")
+                .param("id",order.id()).query(Long.class).single()).isEqualTo(initial.equals("UNKNOWN")?0:1);
+    }
+
+    private void awaitComplete(org.apache.kafka.clients.producer.RecordMetadata source) throws Exception {
+        await(()->jdbc.sql("SELECT count(*) FROM messaging_deliveries WHERE source_topic=:topic AND source_partition=:partition AND source_offset=:offset AND phase='COMPLETE'")
+                .param("topic",source.topic()).param("partition",source.partition()).param("offset",source.offset()).query(Long.class).single()==1);
     }
 
     private void assertPartitionBlocked(OrderView later,org.apache.kafka.clients.producer.RecordMetadata offending) throws Exception {
