@@ -140,23 +140,30 @@ class KafkaWorkflowTests {
         }
     }
 
-    @Test @Order(5)
-    void acknowledgmentThenDatabaseFailureReplaysIdenticalEventAndDurablyPausesAtFiveAttempts(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"OrderPlaced","OrderConfirmed"})
+    @Order(5)
+    void acknowledgmentThenDatabaseFailureReplaysIdenticalEventAndDurablyPausesAtFiveAttempts(String type, org.springframework.boot.test.system.CapturedOutput output) throws Exception {
         await(()->jdbc.sql("SELECT count(*) FROM outbox_events WHERE published_at IS NULL").query(Long.class).single()==0);
-        jdbc.sql("ALTER TABLE outbox_events ADD CONSTRAINT reject_publication_mark CHECK(published_at IS NULL) NOT VALID").update();
+        jdbc.sql("ALTER TABLE outbox_events ADD CONSTRAINT reject_publication_mark CHECK(event_type<>'"+type+"' OR published_at IS NULL) NOT VALID").update();
         var order=create();
-        var stored=jdbc.sql("SELECT event_json::text FROM outbox_events WHERE aggregate_id=:id").param("id",order.id()).query(String.class).single();
+        if(type.equals("OrderConfirmed")) {
+            kafka.send(KafkaConfiguration.INVENTORY_TOPIC,bytes(order.id().toString()),bytes(outcome(order,"InventoryReserved",null))).get(10,TimeUnit.SECONDS);
+            await(()->orders.get(order.id()).status()==OrderStatus.CONFIRMED);
+        }
+        var stored=jdbc.sql("SELECT event_json::text FROM outbox_events WHERE aggregate_id=:id AND event_type=:type").param("id",order.id()).param("type",type).query(String.class).single();
         try {
             await(()->jdbc.sql("SELECT paused FROM messaging_relay_control WHERE id=1").query(Boolean.class).single());
-            assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id").param("id",order.id()).query(Integer.class).single()).isEqualTo(5);
-            assertThat(published(order)).isFalse();
+            assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id AND event_type=:type").param("id",order.id()).param("type",type).query(Integer.class).single()).isEqualTo(5);
+            assertThat(published(order,type)).isFalse();
             assertThat(output.getOut()).contains("state=PAUSED, attempt=5, classification=RETRY_EXHAUSTED");
             try(var consumer=consumer(KafkaConfiguration.ORDER_TOPIC)) {
                 int repeats=0;
                 var deadline=Instant.now().plusSeconds(15);
                 while(repeats<5 && Instant.now().isBefore(deadline)) {
                     for(var record:consumer.poll(Duration.ofMillis(200))) {
-                        if(java.util.Arrays.equals(record.key(),bytes(order.id().toString()))) {
+                        if(java.util.Arrays.equals(record.key(),bytes(order.id().toString()))
+                                && mapper.readTree(new String(record.value(),StandardCharsets.UTF_8)).path("eventType").asString().equals(type)) {
                             assertThat(record.value()).isEqualTo(bytes(stored));
                             repeats++;
                         }
@@ -165,13 +172,13 @@ class KafkaWorkflowTests {
                 assertThat(repeats).isEqualTo(5);
             }
             new OutboxRelay(dataSource,jdbc,kafka,properties,transactions).publishNext();
-            assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id").param("id",order.id()).query(Integer.class).single()).isEqualTo(5);
+            assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id AND event_type=:type").param("id",order.id()).param("type",type).query(Integer.class).single()).isEqualTo(5);
         } finally {
             jdbc.sql("ALTER TABLE outbox_events DROP CONSTRAINT reject_publication_mark").update();
-            jdbc.sql("UPDATE outbox_events SET publication_attempts=0,next_attempt_at=NULL WHERE aggregate_id=:id").param("id",order.id()).update();
+            jdbc.sql("UPDATE outbox_events SET publication_attempts=0,next_attempt_at=NULL WHERE aggregate_id=:id AND event_type=:type").param("id",order.id()).param("type",type).update();
             jdbc.sql("UPDATE messaging_relay_control SET paused=FALSE,failure_classification=NULL WHERE id=1").update();
         }
-        await(()->published(order));
+        await(()->published(order,type));
     }
 
     @Test @Order(6)
@@ -329,8 +336,12 @@ class KafkaWorkflowTests {
     }
 
     private boolean published(OrderView order) {
-        return jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id")
-                .param("id",order.id()).query(Boolean.class).single();
+        return published(order,"OrderPlaced");
+    }
+
+    private boolean published(OrderView order,String type) {
+        return jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
+                .param("id",order.id()).param("type",type).query(Boolean.class).single();
     }
 
     private OrderView create() {

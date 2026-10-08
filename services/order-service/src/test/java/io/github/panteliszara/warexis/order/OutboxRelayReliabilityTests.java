@@ -32,12 +32,25 @@ class OutboxRelayReliabilityTests {
     @Autowired JdbcClient jdbc;
     @Autowired PlatformTransactionManager transactions;
     @Autowired OrderService orders;
+    @Autowired io.github.panteliszara.warexis.order.messaging.InventoryOutcomeService outcomes;
 
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"OrderPlaced","OrderConfirmed"})
     @SuppressWarnings("unchecked")
-    void competingRelayCannotOvertakeHeadWhileItsBrokerAcknowledgmentIsPending() throws Exception {
+    void competingRelayCannotOvertakeHeadWhileItsBrokerAcknowledgmentIsPending(String type) throws Exception {
         var first=orders.create(List.of(new OrderLineInput("First",1)));
         var second=orders.create(List.of(new OrderLineInput("Second",1)));
+        if(type.equals("OrderConfirmed")) {
+            for(var order:List.of(first,second)) {
+                var origin=jdbc.sql("SELECT event_id FROM outbox_events WHERE aggregate_id=:id AND event_type='OrderPlaced'")
+                        .param("id",order.id()).query(java.util.UUID.class).single();
+                var reservation=java.util.UUID.randomUUID();
+                outcomes.apply(new io.github.panteliszara.warexis.order.messaging.InventoryOutcome(java.util.UUID.randomUUID(),"InventoryReserved",
+                        java.time.Instant.now(),reservation,order.id(),origin,order.id(),reservation,
+                        order.lines().stream().map(line->new io.github.panteliszara.warexis.order.messaging.InventoryOutcome.Line(line.id(),line.sku(),line.quantity())).toList(),null));
+            }
+            jdbc.sql("UPDATE outbox_events SET published_at=GREATEST(CURRENT_TIMESTAMP,occurred_at) WHERE event_type='OrderPlaced'").update();
+        }
         var kafka=(KafkaTemplate<byte[],byte[]>)mock(KafkaTemplate.class);
         var acknowledged=new CompletableFuture<SendResult<byte[],byte[]>>();
         var sent=new CountDownLatch(1);
@@ -52,22 +65,22 @@ class OutboxRelayReliabilityTests {
             var task=executor.submit(owner::publishNext);
             try {
                 assertThat(sent.await(5,TimeUnit.SECONDS)).isTrue();
-                assertThat(jdbc.sql("SELECT published_at IS NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id")
-                        .param("id",first.id()).query(Boolean.class).single()).isTrue();
+                assertThat(jdbc.sql("SELECT published_at IS NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
+                        .param("id",first.id()).param("type",type).query(Boolean.class).single()).isTrue();
                 competitor.publishNext();
                 verify(kafka,times(1)).send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class));
-                assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id")
-                        .param("id",second.id()).query(Integer.class).single()).isZero();
+                assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
+                        .param("id",second.id()).param("type",type).query(Integer.class).single()).isZero();
             } finally {
                 acknowledged.complete(null);
             }
             task.get(5,TimeUnit.SECONDS);
         }
-        assertThat(jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id")
-                .param("id",first.id()).query(Boolean.class).single()).isTrue();
+        assertThat(jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
+                .param("id",first.id()).param("type",type).query(Boolean.class).single()).isTrue();
         competitor.publishNext();
         verify(kafka,times(2)).send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class));
-        assertThat(jdbc.sql("SELECT published_at IS NOT NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id")
-                .param("id",second.id()).query(Boolean.class).single()).isTrue();
+        assertThat(jdbc.sql("SELECT published_at IS NOT NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
+                .param("id",second.id()).param("type",type).query(Boolean.class).single()).isTrue();
     }
 }

@@ -93,7 +93,7 @@ at microsecond precision, `aggregateId = correlationId = orderId`, and omits
 repeated SKUs; no persistence entities are serialized.
 
 The event ID is unique. An additional aggregate/type/version constraint prevents
-a second `OrderPlaced` v1 event for the same order. PostgreSQL checks envelope
+a second v1 event of either Order-owned type for the same order. PostgreSQL checks envelope
 metadata consistency and enforces an aggregate foreign key. `published_at` is
 initially null, with a partial `(occurred_at, event_id)` index for polling
 of unpublished rows. The relay reuses the persisted envelope and event ID,
@@ -109,7 +109,7 @@ export WAREXIS_MESSAGING_ENABLED=true
 export KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
 ```
 
-Order publishes `OrderPlaced` to `warexis.order.events.v1` and consumes Inventory
+Order publishes `OrderPlaced` and `OrderConfirmed` to `warexis.order.events.v1` and consumes Inventory
 outcomes from `warexis.inventory.events.v1` as group
 `warexis.order.inventory-events.v1`. Source topics and the Order consumer DLT
 `warexis.inventory.events.v1.order.dlt` have three partitions and local replication
@@ -124,7 +124,17 @@ original terminal status and go to DLT, in either direction (`CONFIRMED` followe
 by rejection, or `REJECTED` followed by reservation). A structurally valid outcome
 for an unknown order also goes directly to DLT, without futile technical retries.
 Identical rejected outcomes and matching aliases are idempotent, like successful
-reservation outcomes. No Fulfillment event is emitted.
+reservation outcomes.
+
+The first accepted `InventoryReserved` atomically commits `CONFIRMED`, its
+inventory decision, processed input and one `OrderConfirmed` outbox event. Its
+causation ID is that first accepted Inventory event ID, stored in both metadata
+and JSON; the original ordered lines and reservation ID are preserved. Rejection,
+redelivery, matching aliases and conflicts create no second confirmation. Order
+remains `CONFIRMED` after a later manual Fulfillment dispatch; this service does
+not consume `FulfillmentShipped` or own a shipping status. Enable publication only
+with consumers that recognize and validate the additive `OrderConfirmed` type,
+including the compatible Inventory consumer.
 
 The relay acquires a dedicated PostgreSQL session advisory lock so only one
 replica publishes at a time, takes the oldest unpublished `(occurred_at,event_id)`

@@ -66,6 +66,30 @@ public final class EventJson {
         }
     }
 
+    public static void orderConfirmed(byte[] key, byte[] value) {
+        try {
+            var event = envelope(key, value);
+            if (!text(event, "eventType").equals("OrderConfirmed")
+                    || event.path("payload").has("reasonCode")
+                    || !uuid(event, "aggregateId").equals(uuid(event.path("payload"), "orderId"))) {
+                throw new PoisonMessageException();
+            }
+            uuid(event, "causationId");
+            uuid(event.path("payload"), "reservationId");
+            lines(event.path("payload"));
+        } catch (RuntimeException ex) {
+            throw new PoisonMessageException();
+        }
+    }
+
+    public static void orderEvent(byte[] key, byte[] value, String expectedType) {
+        switch (expectedType) {
+            case "OrderPlaced" -> orderPlaced(key, value);
+            case "OrderConfirmed" -> orderConfirmed(key, value);
+            default -> throw new PoisonMessageException();
+        }
+    }
+
     private static JsonNode envelope(byte[] key, byte[] value) {
         var event = JSON.readTree(utf8(value));
         if (event == null || !event.isObject() || !event.path("payload").isObject()
