@@ -58,6 +58,11 @@ public class WorkflowEventValidator {
                 case "OrderPlaced" -> {
                     if (!aggregateId.equals(orderId) || root.has("causationId")) throw new InvalidEventException();
                 }
+                case "OrderConfirmed" -> {
+                    if (!aggregateId.equals(orderId) || payload.has("reasonCode")) throw new InvalidEventException();
+                    uuid(payload, "reservationId");
+                    uuid(root, "causationId");
+                }
                 case "InventoryReserved", "InventoryRejected" -> {
                     if (!aggregateId.equals(uuid(payload, "reservationId"))) throw new InvalidEventException();
                     uuid(root, "causationId");

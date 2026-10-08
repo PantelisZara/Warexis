@@ -51,6 +51,36 @@ class WorkflowEventValidatorTests {
                 event().replace("\"correlationId\":\"" + ORDER + "\"", "\"correlationId\":null"));
     }
 
+
+    static String confirmed() {
+        return event().replace("OrderPlaced", "OrderConfirmed")
+                .replace("\"payload\":{", "\"causationId\":\"44444444-4444-4444-8444-444444444444\",\"payload\":{\"reservationId\":\"55555555-5555-4555-8555-555555555555\",");
+    }
+
+    @Test
+    void recognizesFullyValidatedUnsubscribedConfirmationWithCompatibleOptionalFields() {
+        var value = confirmed().replace("\"eventVersion\":1", "\"futureOptional\":true,\"eventVersion\":1");
+        assertThat(validator.validate(ORDER.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8)).eventType())
+                .isEqualTo("OrderConfirmed");
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidConfirmations")
+    void rejectsInvalidConfirmationEvenThoughItIsUnsubscribed(String invalid) {
+        assertThatThrownBy(() -> validator.validate(ORDER.getBytes(StandardCharsets.UTF_8), invalid.getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(InvalidEventException.class);
+    }
+
+    static Stream<String> invalidConfirmations() {
+        return Stream.of(confirmed().replace("\"reservationId\":\"55555555-5555-4555-8555-555555555555\",", ""),
+                confirmed().replace("\"causationId\":\"44444444-4444-4444-8444-444444444444\",", ""),
+                confirmed().replace("55555555-5555-4555-8555-555555555555", "5-5-5-5-5"),
+                confirmed().replace("\"aggregateId\":\"" + ORDER + "\"", "\"aggregateId\":\"55555555-5555-4555-8555-555555555555\""),
+                confirmed().replace("\"quantity\":2", "\"quantity\":0"),
+                confirmed().replace("\"eventVersion\":1", "\"eventVersion\":2"),
+                confirmed().replace("\"payload\":{", "\"payload\":{\"reasonCode\":\"UNKNOWN_SKU\","));
+    }
+
     @Test
     void rejectsWrongKafkaKeyNullAndMalformedUtf8WithoutReplacement() {
         assertThatThrownBy(() -> validator.validate("wrong".getBytes(StandardCharsets.UTF_8), event().getBytes(StandardCharsets.UTF_8))).isInstanceOf(InvalidEventException.class);

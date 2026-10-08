@@ -9,15 +9,15 @@ All UUID fields use canonical UUID strings. Events are UTF-8 JSON objects, not s
 | Field | Version 1 contract |
 | --- | --- |
 | `eventId` | UUID generated once for one domain event; unchanged on publication retries |
-| `eventType` | `OrderPlaced`, `InventoryReserved`, or `InventoryRejected` |
+| `eventType` | `OrderPlaced`, `InventoryReserved`, `InventoryRejected`, `OrderConfirmed`, or `FulfillmentShipped` |
 | `eventVersion` | JSON integer `1` |
 | `occurredAt` | ISO 8601 UTC timestamp with `Z`, set when the domain occurrence is recorded |
-| `aggregateId` | Order UUID for `OrderPlaced`; reservation UUID for either inventory outcome |
+| `aggregateId` | Order UUID for Order facts; reservation UUID for inventory outcomes; fulfillment UUID for `FulfillmentShipped` |
 | `correlationId` | `payload.orderId`, connecting the complete workflow |
-| `causationId` | Triggering `OrderPlaced.eventId` for inventory outcomes; omitted for `OrderPlaced` |
+| `causationId` | Triggering `OrderPlaced.eventId` for inventory outcomes; first `InventoryReserved.eventId` for `OrderConfirmed`; omitted for REST-triggered `OrderPlaced` and `FulfillmentShipped` |
 | `payload` | Object containing the fields defined for the specific event below |
 
-`orderId` is the Kafka record key for all three events, independently of `aggregateId`. Publish the canonical lowercase UUID string as the UTF-8 key; consumers validate that it matches `payload.orderId`. Outbox publication retains the stored event identity, metadata, and JSON values; it must not create a new event or timestamp for a retry. JSON object property order is not semantic, whereas array order is preserved.
+`orderId` is the Kafka record key for all five events, independently of `aggregateId`. Publish the canonical lowercase UUID string as the UTF-8 key; consumers validate that it matches `payload.orderId`. Outbox publication retains the stored event identity, metadata, and JSON values; it must not create a new event or timestamp for a retry. JSON object property order is not semantic, whereas array order is preserved.
 
 Payload `lines` contains 1–100 original order lines in their original order. Each has a unique `orderLineId` UUID within the order, an exact case-sensitive `sku` matching `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, and a JSON integer `quantity` in `1..2147483647`. There is no case normalization. Repeated SKUs remain separate lines in events and decisions; Inventory sums their quantities using a wide integer before stock checks. An aggregate demand greater than available stock produces a normal rejection, without integer overflow.
 
@@ -174,4 +174,22 @@ Consumers tolerate unknown optional JSON fields. Adding such fields is compatibl
 
 A breaking envelope/payload change requires a new `eventVersion` and an explicitly versioned capability stream, with a coordinated producer/consumer rollout and replay plan. A new event type in an existing stream needs a documented contract, subscription/filtering review, and consumer compatibility tests before production publication. Avoid both hidden coupling through shared Java classes and treating arbitrary JSON as a validated contract.
 
-`OrderConfirmed` remains a future Fulfillment integration event and has no contract or publication in this milestone.
+## Phase 6 additive contracts
+
+The following contracts are frozen for the Phase 6 implementation. This section defines the interface; it does not certify that the complete three-service runtime gate has passed.
+
+### OrderConfirmed
+
+Order produces this fact on `warexis.order.events.v1` atomically with its first accepted inventory decision and CONFIRMED transition. Fulfillment subscribes as `warexis.fulfillment.order-events.v1`, with its own `warexis.order.events.v1.fulfillment.dlt`. Inventory fully validates this recognized type, records durable delivery completion and acknowledges it without stock, reservation, processed business event or outgoing event changes. Deploy Inventory compatibility before enabling Order publication.
+
+The V1 envelope uses `aggregateId = correlationId = payload.orderId`, `causationId =` the first accepted `InventoryReserved.eventId`, and payload `{orderId,reservationId,lines}`. Lines retain the existing ordered 1–100-line contract. Rejection, redelivery, matching aliases and conflicting terminal outcomes never produce another confirmation. The outbox causation column matches the stored JSON; event identity/time are assigned only once.
+
+### FulfillmentShipped
+
+Fulfillment produces this fact on `warexis.fulfillment.events.v1` atomically with manual dispatch. No service subscribes to this output in Phase 6. Its aggregate is `fulfillmentId`, correlation and Kafka key are `orderId`, and `occurredAt` is the server-owned `shippedAt`. The immediate cause is a REST operator command without an event identity, so `causationId` is omitted. The workflow origin is explicit `payload.orderConfirmedEventId`.
+
+Payload: `{fulfillmentId,orderId,reservationId,orderConfirmedEventId,shipmentReference,shippedAt,lines}`. The internal case-sensitive reference matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and belongs to one fulfillment. Repeating the identical ship command returns the original projection/time and emits no additional fact. A changed terminal reference or reference reused by another fulfillment is a conflict with no mutation.
+
+Fulfillment creates one PENDING full-order record only from validated OrderConfirmed. It validates/acknowledges unsubscribed OrderPlaced, and never creates fulfillment from InventoryReserved. Same-event changed known content is poison. A new confirmation event identity for the same order with identical reservation, ordered lines and causal origin records an alias, preserving the first confirmation identity and any SHIPPED state; changed origin/reservation/lines or cross-order reservation reuse is poison. Compatible unknown optional JSON fields do not affect known-contract fingerprints.
+
+Fulfillment owns its database, processed-confirmation ledger, transactional outbox, durable retry/DLT state and relay control. It uses the established bounded budgets and acknowledgment rules above. Order remains CONFIRMED after manual shipping. See [ADR 0005](adr/0005-fulfillment-and-manual-dispatch.md).

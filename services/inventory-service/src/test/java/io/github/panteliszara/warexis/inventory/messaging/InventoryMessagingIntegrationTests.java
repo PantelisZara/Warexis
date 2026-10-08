@@ -98,6 +98,69 @@ class InventoryMessagingIntegrationTests {
         assertThat(count("SELECT count(*) FROM outbox_events WHERE published_at IS NOT NULL AND publication_attempts = 1")).isEqualTo(1);
     }
 
+
+    @Test
+    void validatedConfirmationIsDurablyAcknowledgedWithoutAnyInventoryBusinessEffect() throws Exception {
+        var sku = stock(5);
+        var incoming = event(sku, 2);
+        var json = (tools.jackson.databind.node.ObjectNode) mapper.readTree(incoming.value());
+        json.put("eventType", "OrderConfirmed");
+        json.put("causationId", UUID.randomUUID().toString());
+        ((tools.jackson.databind.node.ObjectNode) json.path("payload")).put("reservationId", UUID.randomUUID().toString());
+        var sent = kafka.send(new org.apache.kafka.clients.producer.ProducerRecord<byte[], byte[]>(
+                "warexis.order.events.v1", 0, incoming.key(), mapper.writeValueAsBytes(json)))
+                .get(15, TimeUnit.SECONDS).getRecordMetadata();
+        var source = new ConsumerRecord<byte[], byte[]>(sent.topic(), sent.partition(), sent.offset(), incoming.key(), mapper.writeValueAsBytes(json));
+        var container = registry.getListenerContainer("inventory-orders");
+        // This class also publishes unrelated records in relay tests. Seek this isolated partition to
+        // the confirmation before enabling the listener, so earlier test inputs cannot mutate stock.
+        try (var admin = org.apache.kafka.clients.admin.Admin.create(Map.of("bootstrap.servers", broker.getBootstrapServers()))) {
+            var offsets = new java.util.HashMap<TopicPartition, org.apache.kafka.clients.consumer.OffsetAndMetadata>();
+            var ends = admin.listOffsets(Map.of(new TopicPartition(source.topic(), 0), org.apache.kafka.clients.admin.OffsetSpec.latest(),
+                    new TopicPartition(source.topic(), 1), org.apache.kafka.clients.admin.OffsetSpec.latest(),
+                    new TopicPartition(source.topic(), 2), org.apache.kafka.clients.admin.OffsetSpec.latest())).all().get(10, TimeUnit.SECONDS);
+            ends.forEach((partition, end) -> offsets.put(partition, new org.apache.kafka.clients.consumer.OffsetAndMetadata(end.offset())));
+            offsets.put(new TopicPartition(source.topic(), 0), new org.apache.kafka.clients.consumer.OffsetAndMetadata(source.offset()));
+            admin.alterConsumerGroupOffsets(ConsumerDeliveryStore.GROUP, offsets).all().get(10, TimeUnit.SECONDS);
+            try {
+                container.start();
+                var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                boolean acknowledged = false;
+                while (System.nanoTime() < deadline && !acknowledged) {
+                    var committed = admin.listConsumerGroupOffsets(ConsumerDeliveryStore.GROUP).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS);
+                    var offset = committed.get(new TopicPartition(source.topic(), source.partition()));
+                    acknowledged = offset != null && offset.offset() > source.offset();
+                    if (!acknowledged) Thread.sleep(25);
+                }
+                assertThat(acknowledged).as("real Kafka confirmation source acknowledged").isTrue();
+            } finally { container.stop(); }
+        }
+        assertThat(delivery.load(source).phase()).isEqualTo("COMPLETE");
+        assertThat(delivery.load(source).processingAttempts()).isZero();
+        assertThat(delivery.load(source).dltAttempts()).isZero();
+        assertThat(stocks.get(sku).getReserved()).isZero();
+        assertThat(count("SELECT count(*) FROM inventory_reservations")).isZero();
+        assertThat(count("SELECT count(*) FROM processed_order_events")).isZero();
+        assertThat(count("SELECT count(*) FROM outbox_events")).isZero();
+    }
+
+    @Test
+    void malformedConfirmationReachesRealDltRatherThanCompatibleSkip() throws Exception {
+        var incoming = event(stock(5), 1);
+        var json = (tools.jackson.databind.node.ObjectNode) mapper.readTree(incoming.value());
+        json.put("eventType", "OrderConfirmed"); // Required reservationId and causationId absent.
+        var source = new ConsumerRecord<byte[], byte[]>(incoming.topic(), incoming.partition(), offset.incrementAndGet(), incoming.key(), mapper.writeValueAsBytes(json));
+        var acknowledgment = mock(Acknowledgment.class);
+        listener.receive(source, acknowledgment, consumer());
+        assertThat(consume(InventoryOrderListener.DLT, source.key()).value()).containsExactly(source.value());
+        verify(acknowledgment).acknowledge();
+        assertThat(delivery.load(source).phase()).isEqualTo("COMPLETE");
+        assertThat(delivery.load(source).processingAttempts()).isZero();
+        assertThat(count("SELECT count(*) FROM inventory_reservations")).isZero();
+        assertThat(count("SELECT count(*) FROM processed_order_events")).isZero();
+        assertThat(count("SELECT count(*) FROM outbox_events")).isZero();
+    }
+
     @Test
     void businessRejectionIsSuccessfulProcessingWithoutRetry() {
         var record = event(stock(0), 2);

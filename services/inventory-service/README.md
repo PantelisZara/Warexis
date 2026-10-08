@@ -96,7 +96,11 @@ as `warexis.inventory.order-events.v1` and publishes committed decisions to
 UUID. The transport uses raw bytes with strict UTF-8/JSON validation, so malformed
 UTF-8, duplicate JSON fields, trailing JSON, unsupported types/versions, bad keys,
 and conflicting immutable identities cannot mutate stock. Compatible optional
-fields are accepted. Business rejection commits normally and is acknowledged;
+fields are accepted. A fully validated `OrderConfirmed` is a recognized, unsubscribed
+Order fact: the adapter persists COMPLETE and acknowledges it without touching
+stock, reservations, processed business events or outgoing Inventory events.
+Malformed confirmations still enter the Inventory DLT. Compatibility must be
+deployed before Order enables confirmation publication. Business rejection commits normally and is acknowledged;
 its single successful processing claim consumes no additional technical retries.
 
 The listener acknowledges only after the reservation transaction commits and
