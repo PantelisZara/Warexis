@@ -7,6 +7,8 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import io.github.panteliszara.warexis.order.orders.domain.OrderStatus;
+import io.github.panteliszara.warexis.order.outbox.OutboxEvent;
+import io.github.panteliszara.warexis.order.outbox.OutboxRepository;
 import io.github.panteliszara.warexis.order.orders.persistence.OrderRepository;
 
 @Service
@@ -14,11 +16,13 @@ public class InventoryOutcomeService {
     private final OrderRepository orders;
     private final JdbcClient jdbc;
     private final ObjectMapper mapper;
+    private final OutboxRepository outbox;
 
-    public InventoryOutcomeService(OrderRepository orders, JdbcClient jdbc, ObjectMapper mapper) {
+    public InventoryOutcomeService(OrderRepository orders, JdbcClient jdbc, ObjectMapper mapper, OutboxRepository outbox) {
         this.orders = orders;
         this.jdbc = jdbc;
         this.mapper = mapper;
+        this.outbox = outbox;
     }
 
     @Transactional
@@ -62,13 +66,24 @@ public class InventoryOutcomeService {
             if (reservationOwner.isPresent()) {
                 throw new PoisonMessageException();
             }
-            jdbc.sql("INSERT INTO inventory_decisions (order_id,reservation_id,decision_json) VALUES (:orderId,:reservationId,CAST(:json AS jsonb))")
+            requireOne(jdbc.sql("INSERT INTO inventory_decisions (order_id,reservation_id,decision_json) VALUES (:orderId,:reservationId,CAST(:json AS jsonb))")
                     .param("orderId", order.getId()).param("reservationId", outcome.reservationId())
-                    .param("json", decisionJson).update();
-            order.resolveInventory(outcome.eventType().equals("InventoryReserved"), Instant.now());
+                    .param("json", decisionJson).update());
+            var confirmed = outcome.eventType().equals("InventoryReserved");
+            var resolvedAt = Instant.now();
+            order.resolveInventory(confirmed, resolvedAt);
             orders.flush();
+            if (confirmed) {
+                outbox.append(OutboxEvent.orderConfirmed(order, outcome.reservationId(), outcome.eventId(), order.getUpdatedAt(), mapper));
+            }
         }
-        jdbc.sql("INSERT INTO processed_inventory_events VALUES (:id,:orderId,CAST(:json AS jsonb))")
-                .param("id", outcome.eventId()).param("orderId", order.getId()).param("json", incoming).update();
+        requireOne(jdbc.sql("INSERT INTO processed_inventory_events VALUES (:id,:orderId,CAST(:json AS jsonb))")
+                .param("id", outcome.eventId()).param("orderId", order.getId()).param("json", incoming).update());
+    }
+
+    private void requireOne(int rows) {
+        if (rows != 1) {
+            throw new IllegalStateException("Inventory outcome write did not persist one row.");
+        }
     }
 }

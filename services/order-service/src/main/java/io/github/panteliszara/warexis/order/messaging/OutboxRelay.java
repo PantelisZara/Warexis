@@ -51,10 +51,10 @@ public class OutboxRelay {
                     return;
                 }
                 var pending = jdbc.sql("""
-                        SELECT event_id, aggregate_id, event_json::text, publication_attempts, next_attempt_at
+                        SELECT event_id, aggregate_id, event_json::text, publication_attempts, next_attempt_at, event_type
                         FROM outbox_events WHERE published_at IS NULL ORDER BY occurred_at, event_id LIMIT 1
                         """).query((rs, n) -> new Pending(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
-                        rs.getString(3), rs.getInt(4), rs.getTimestamp(5))).optional();
+                        rs.getString(3), rs.getInt(4), rs.getTimestamp(5), rs.getString(6))).optional();
                 if (pending.isEmpty()) {
                     return;
                 }
@@ -69,7 +69,7 @@ public class OutboxRelay {
                 var key = event.orderId().toString().getBytes(StandardCharsets.UTF_8);
                 var body = event.json().getBytes(StandardCharsets.UTF_8);
                 try {
-                    EventJson.orderPlaced(key, body);
+                    EventJson.orderEvent(key, body, event.type());
                 } catch (PoisonMessageException ex) {
                     pause("INVALID_EVENT", event, event.attempts());
                     return;
@@ -92,8 +92,8 @@ public class OutboxRelay {
                     if (event.attempts() + 1 >= 5) {
                         pause("RETRY_EXHAUSTED", event, event.attempts() + 1);
                     }
-                    LOG.warn("Order relay publication remains pending; eventId={}, eventType=OrderPlaced, orderId={}, state=PENDING, attempt={}",
-                            event.id(), event.orderId(), event.attempts() + 1);
+                    LOG.warn("Order relay publication remains pending; eventId={}, eventType={}, orderId={}, state=PENDING, attempt={}",
+                            event.id(), event.type(), event.orderId(), event.attempts() + 1);
                 }
             } finally {
                 try {
@@ -118,10 +118,10 @@ public class OutboxRelay {
     private void pause(String classification, Pending event, int attempt) {
         jdbc.sql("UPDATE messaging_relay_control SET paused = TRUE, failure_classification = :classification WHERE id = 1")
                 .param("classification", classification).update();
-        LOG.error("Order relay paused; eventId={}, eventType=OrderPlaced, orderId={}, state=PAUSED, attempt={}, classification={}",
-                event.id(), event.orderId(), attempt, classification);
+        LOG.error("Order relay paused; eventId={}, eventType={}, orderId={}, state=PAUSED, attempt={}, classification={}",
+                event.id(), event.type(), event.orderId(), attempt, classification);
     }
 
-    private record Pending(UUID id, UUID orderId, String json, int attempts, Timestamp nextAt) {
+    private record Pending(UUID id, UUID orderId, String json, int attempts, Timestamp nextAt, String type) {
     }
 }
