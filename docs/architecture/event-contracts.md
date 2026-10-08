@@ -1,10 +1,10 @@
 # Version 1 event contracts
 
-These JSON contracts define the initial Order/Inventory workflow. Order creation and Inventory reservation processing persist these envelopes in local transactional outboxes. Opt-in Kafka publishers/listeners now implement offset handling, durable bounded attempts, and DLT delivery. No shared Java event library or Schema Registry is required; each service owns its representations and contract tests.
+These JSON contracts define the Order, Inventory, and Fulfillment workflow. Order creation, Inventory reservation processing, Order confirmation, and manual Fulfillment dispatch persist these envelopes in local transactional outboxes. Opt-in Kafka publishers/listeners now implement offset handling, durable bounded attempts, and DLT delivery. No shared Java event library or Schema Registry is required; each service owns its representations and contract tests.
 
 ## Common envelope
 
-All UUID fields use canonical UUID strings. Events are UTF-8 JSON objects, not serialized database entities. Required fields must be present and non-null; `causationId` is omitted for initial REST-triggered creation.
+All UUID fields use canonical lowercase UUID strings. Events are strict UTF-8 JSON objects, not serialized database entities. Duplicate properties, trailing JSON, and invalid required types are rejected. Required fields must be present and non-null; `causationId` is omitted for initial REST-triggered creation.
 
 | Field | Version 1 contract |
 | --- | --- |
@@ -137,8 +137,10 @@ Use capability streams rather than a topic for each event. See [ADR 0004](adr/00
 
 | Source topic | Owner / current event types | Consumer group | Subscribed event types | DLT owned by that consumer |
 | --- | --- | --- | --- | --- |
-| `warexis.order.events.v1` | Order / `OrderPlaced` | `warexis.inventory.order-events.v1` | `OrderPlaced` | `warexis.order.events.v1.inventory.dlt` |
+| `warexis.order.events.v1` | Order / `OrderPlaced`, `OrderConfirmed` | `warexis.inventory.order-events.v1` | `OrderPlaced` | `warexis.order.events.v1.inventory.dlt` |
 | `warexis.inventory.events.v1` | Inventory / `InventoryReserved`, `InventoryRejected` | `warexis.order.inventory-events.v1` | Both inventory outcomes | `warexis.inventory.events.v1.order.dlt` |
+| `warexis.order.events.v1` | Order / `OrderPlaced`, `OrderConfirmed` | `warexis.fulfillment.order-events.v1` | `OrderConfirmed` | `warexis.order.events.v1.fulfillment.dlt` |
+| `warexis.fulfillment.events.v1` | Fulfillment / `FulfillmentShipped` | None currently | None | None |
 
 All replicas of one consumer service use its group; independent consumers use distinct groups. Consumers filter by `eventType`. A documented, recognized event type outside a group's subscription can be acknowledged without business processing after envelope validation. Unknown types and unsupported versions are quarantined until their contracts are understood, rather than silently discarded. Future consumers get their own failure destinations; one group's failed processing must not interfere with another group's offsets or recovery.
 
@@ -148,7 +150,7 @@ Kafka preserves record order only within one topic partition. The `orderId` key 
 
 ## Bounded delivery and failure handling
 
-Both services implement these rules with local durable delivery metadata. See [workflow startup and explicit recovery](kafka-workflow.md). No automatic redrive or event cleanup runs.
+All three services implement these rules with local durable delivery metadata. See [workflow startup and explicit recovery](kafka-workflow.md). No automatic redrive or event cleanup runs.
 
 ### Outbox publication
 
@@ -162,9 +164,9 @@ Transient technical failures, such as unavailable PostgreSQL, retry the same rec
 
 Malformed JSON, invalid envelopes/payloads, unsupported versions/types/reason codes, inconsistent Kafka keys, and conflicting message or business identities go directly to the consumer's DLT with no futile retries and no business mutation. Exhausted transient failures also go to that DLT. `InventoryRejected` is successful business processing: commit the rejected decision and its outgoing event, then acknowledge normally.
 
-A consumer acknowledges a successfully processed source record only after its database transaction commits. For DLT recovery, confirm DLT publication before committing the source offset. Include the original key and bytes plus source topic, partition, offset, group, failure classification, attempt count, and failure timestamp as transport metadata. Preserve the original event when it is parseable; do not replace its event ID. Avoid credentials, full exception dumps, or environment configuration in failure metadata.
+A consumer acknowledges a successfully processed source record only after its business transaction and durable delivery completion commit. For DLT recovery, confirm DLT publication and persist durable delivery completion before committing the source offset. Include the original key and bytes plus source topic, partition, offset, group, failure classification, attempt count, and failure timestamp as transport metadata. Preserve the original event when it is parseable; do not replace its event ID. Avoid credentials, full exception dumps, or environment configuration in failure metadata.
 
-A crash between DLT publication and source acknowledgment can duplicate a DLT record; diagnose/redrive using source topic/partition/offset. If DLT publication itself fails after the same bounded technical retry budget, pause the affected partition, leave its source offset uncommitted, and surface the failure for explicit operator recovery. Do not silently drop the record or run an infinite DLT loop.
+A crash between DLT publication and source acknowledgment can duplicate a DLT record; diagnose/redrive using source topic/partition/offset and consumer group. Historical identical keys and bytes do not identify the current failed source record. If DLT publication itself fails after the same bounded technical retry budget, pause the affected partition, leave its source offset uncommitted, and surface the failure for explicit operator recovery. Do not silently drop the record or run an infinite DLT loop.
 
 DLT messages have no automatic consumer or republish loop. Redrive is explicit after fixing the cause, preserves event identity and key, and uses the normal idempotent handler. Redrive can be later than subsequent records, so domain-state validation must reject contradictions. Source and DLT retention and deduplication/outbox cleanup windows must be configured together before enabling deletion; no event or decision cleanup runs.
 
@@ -174,9 +176,9 @@ Consumers tolerate unknown optional JSON fields. Adding such fields is compatibl
 
 A breaking envelope/payload change requires a new `eventVersion` and an explicitly versioned capability stream, with a coordinated producer/consumer rollout and replay plan. A new event type in an existing stream needs a documented contract, subscription/filtering review, and consumer compatibility tests before production publication. Avoid both hidden coupling through shared Java classes and treating arbitrary JSON as a validated contract.
 
-## Phase 6 additive contracts
+## Confirmation and manual dispatch contracts
 
-The following contracts are frozen for the Phase 6 implementation. This section defines the interface; it does not certify that the complete three-service runtime gate has passed.
+These additive V1 contracts extend the reservation workflow. The service suites and packaged three-service workflow verify their implemented transaction, identity, and delivery boundaries.
 
 ### OrderConfirmed
 

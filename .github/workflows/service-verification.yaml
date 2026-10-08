@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [order-service, inventory-service]
+        service: [order-service, inventory-service, fulfillment-service]
     defaults:
       run:
         shell: bash
@@ -45,7 +45,7 @@ jobs:
   workflow:
     name: Verify Kafka workflow
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +61,7 @@ jobs:
           cache-dependency-path: |
             services/order-service/pom.xml
             services/inventory-service/pom.xml
+            services/fulfillment-service/pom.xml
             tests/workflow/pom.xml
             services/order-service/.mvn/wrapper/maven-wrapper.properties
       - name: Verify packaged service workflow
@@ -68,7 +69,7 @@ jobs:
       - name: Show service diagnostics on failure
         if: failure()
         run: |
-          for service in order inventory; do
+          for service in order inventory fulfillment; do
             if [ -f "tests/workflow/target/$service.log" ]; then
               tail -n 100 "tests/workflow/target/$service.log"
             fi

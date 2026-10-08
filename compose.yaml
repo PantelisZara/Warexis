@@ -41,6 +41,26 @@ services:
       retries: 5
       start_period: 20s
 
+  fulfillment-postgres:
+    image: postgres:18.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${FULFILLMENT_POSTGRES_DB:-warexis_fulfillment}
+      POSTGRES_USER: ${FULFILLMENT_POSTGRES_USER:-warexis_fulfillment}
+      POSTGRES_PASSWORD: ${FULFILLMENT_POSTGRES_PASSWORD:?Set FULFILLMENT_POSTGRES_PASSWORD for local development}
+    ports:
+      - "127.0.0.1:${FULFILLMENT_POSTGRES_PORT:-15434}:5432"
+    volumes:
+      - fulfillment-postgres-data:/var/lib/postgresql
+    networks:
+      - local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   kafka:
     image: apache/kafka:4.2.2
     restart: unless-stopped
@@ -85,4 +105,5 @@ networks:
 volumes:
   order-postgres-data:
   inventory-postgres-data:
+  fulfillment-postgres-data:
   kafka-data:

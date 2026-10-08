@@ -56,6 +56,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(180)
 class KafkaWorkflowTests {
     private static final String ORDER_TOPIC = "warexis.order.events.v1";
+    private static final String FULFILLMENT_TOPIC = "warexis.fulfillment.events.v1";
+    private static final String FULFILLMENT_GROUP = "warexis.fulfillment.order-events.v1";
     private static final String INVENTORY_TOPIC = "warexis.inventory.events.v1";
     private static final String INVENTORY_GROUP = "warexis.inventory.order-events.v1";
     private static final String ORDER_GROUP = "warexis.order.inventory-events.v1";
@@ -65,6 +67,9 @@ class KafkaWorkflowTests {
     private static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:4.2.2");
     private static final PostgreSQLContainer ORDER_DB = new PostgreSQLContainer("postgres:18.6");
     private static final PostgreSQLContainer INVENTORY_DB = new PostgreSQLContainer("postgres:18.6");
+    private static final PostgreSQLContainer FULFILLMENT_DB = new PostgreSQLContainer("postgres:18.6");
+    private static Process fulfillmentProcess;
+    private static int fulfillmentPort;
     private static Process orderProcess;
     private static Process inventoryProcess;
     private static int orderPort;
@@ -78,17 +83,20 @@ class KafkaWorkflowTests {
         try {
             requireJar("order");
             requireJar("inventory");
+            requireJar("fulfillment");
             // Keep restart diagnostics within this run; previous runs must not satisfy log assertions.
             var target = Path.of("target");
             Files.createDirectories(target);
-            for (var service : List.of("order", "inventory")) Files.writeString(target.resolve(service + ".log"), "");
+            for (var service : List.of("order", "inventory", "fulfillment")) Files.writeString(target.resolve(service + ".log"), "");
             ORDER_DB.start();
             INVENTORY_DB.start();
+            FULFILLMENT_DB.start();
             KAFKA.start();
             admin = AdminClient.create(Map.of("bootstrap.servers", KAFKA.getBootstrapServers(), "request.timeout.ms", "10000"));
             admin.createTopics(List.of(new NewTopic(ORDER_TOPIC, 3, (short) 1), new NewTopic(INVENTORY_TOPIC, 3, (short) 1),
                     new NewTopic(ORDER_TOPIC + ".inventory.dlt", 3, (short) 1),
-                    new NewTopic(INVENTORY_TOPIC + ".order.dlt", 3, (short) 1))).all().get(30, TimeUnit.SECONDS);
+                    new NewTopic(INVENTORY_TOPIC + ".order.dlt", 3, (short) 1),
+                    new NewTopic(FULFILLMENT_TOPIC, 3, (short) 1), new NewTopic(ORDER_TOPIC + ".fulfillment.dlt", 3, (short) 1))).all().get(30, TimeUnit.SECONDS);
             var properties = new Properties();
             properties.put("bootstrap.servers", KAFKA.getBootstrapServers());
             properties.put("key.serializer", StringSerializer.class.getName());
@@ -100,8 +108,11 @@ class KafkaWorkflowTests {
             producer = new KafkaProducer<>(properties);
             orderPort = freePort();
             do { inventoryPort = freePort(); } while (inventoryPort == orderPort);
+            do { fulfillmentPort = freePort(); } while (fulfillmentPort == orderPort || fulfillmentPort == inventoryPort);
+            fulfillmentProcess = startService("fulfillment", fulfillmentPort, FULFILLMENT_DB);
             inventoryProcess = startService("inventory", inventoryPort, INVENTORY_DB);
             orderProcess = startService("order", orderPort, ORDER_DB);
+            health(fulfillmentPort, fulfillmentProcess);
             health(inventoryPort, inventoryProcess);
             health(orderPort, orderProcess);
         } catch (Throwable failure) {
@@ -114,12 +125,14 @@ class KafkaWorkflowTests {
     static void stop() throws Exception {
         var failures = new ArrayList<Throwable>();
         cleanup(() -> stopProcess(orderProcess), failures);
+        cleanup(() -> stopProcess(fulfillmentProcess), failures);
         cleanup(() -> stopProcess(inventoryProcess), failures);
         cleanup(() -> { if (producer != null) producer.close(Duration.ofSeconds(5)); }, failures);
         cleanup(() -> { if (admin != null) admin.close(Duration.ofSeconds(5)); }, failures);
         cleanup(KAFKA::stop, failures);
         cleanup(INVENTORY_DB::stop, failures);
         cleanup(ORDER_DB::stop, failures);
+        cleanup(FULFILLMENT_DB::stop, failures);
         if (!failures.isEmpty()) {
             var failure = new AssertionError("Owned workflow resources could not all be cleaned up");
             failures.forEach(failure::addSuppressed);
@@ -136,13 +149,15 @@ class KafkaWorkflowTests {
         assertReserved(sku, 5);
         assertReserved(second, 1);
         assertDecision(sampleOrder, "RESERVED");
-        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", sampleOrder)).isEqualTo(1);
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", sampleOrder)).isEqualTo(2);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ?", sampleOrder)).isEqualTo(1);
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = 'OrderPlaced'", sampleOrder)).isEqualTo(1);
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = 'OrderConfirmed'", sampleOrder)).isEqualTo(1);
         var placed = JSON.readTree(event(ORDER_DB, sampleOrder, "aggregate_id"));
         var reserved = JSON.readTree(event(INVENTORY_DB, sampleOrder, "correlation_id"));
         assertThat(reserved.path("payload").path("lines")).isEqualTo(placed.path("payload").path("lines"));
         assertThat(reserved.path("causationId").asString()).isEqualTo(placed.path("eventId").asString());
-        await(() -> count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND published_at IS NOT NULL", sampleOrder) == 1
+        await(() -> count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND published_at IS NOT NULL", sampleOrder) == 2
                 && count(INVENTORY_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ? AND published_at IS NOT NULL", sampleOrder) == 1, "both outboxes published");
     }
 
@@ -155,6 +170,8 @@ class KafkaWorkflowTests {
         assertReserved(enough, 0);
         assertReserved(scarce, 0);
         assertDecision(id, "REJECTED");
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = 'OrderConfirmed'", id)).isZero();
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", id)).isZero();
         var rejectedSource = source(ORDER_TOPIC, id);
         committed(rejectedSource, INVENTORY_GROUP);
         assertThat(deliveryAttempts("inventory", rejectedSource, false)).isEqualTo(1);
@@ -248,6 +265,7 @@ class KafkaWorkflowTests {
     }
 
     static Stream<String> serviceDirections() { return Stream.of("order", "inventory"); }
+    static Stream<String> allConsumerDirections() { return Stream.of("order", "inventory", "fulfillment"); }
 
     @ParameterizedTest(name = "{0}: pending outbox survives a JVM crash")
     @MethodSource("serviceDirections") @Order(9)
@@ -259,38 +277,38 @@ class KafkaWorkflowTests {
         String original;
         try {
             id = createOrder(List.of(line(sku, 2)));
-            await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service) + " = ?", id) == 1,
+            await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service) + " = ? AND event_type = '" + eventType(service) + "'", id) == 1,
                     service + " committed pending outbox");
             original = event(database, id, eventColumn(service));
             assertThat(count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service)
-                    + " = ? AND published_at IS NULL AND publication_attempts = 0", id)).isEqualTo(1);
+                    + " = ? AND event_type = '" + eventType(service) + "' AND published_at IS NULL AND publication_attempts = 0", id)).isEqualTo(1);
             if (service.equals("inventory")) assertReserved(sku, 2);
             crashService(service);
         } finally { removeInjection(database, "outbox_events"); }
         restartService(service);
         terminal(id, "CONFIRMED");
         await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service)
-                + " = ? AND published_at IS NOT NULL", id) == 1, service + " pending publication resumes");
+                + " = ? AND event_type = '" + eventType(service) + "' AND published_at IS NOT NULL", id) == 1, service + " pending publication resumes");
         assertThat(event(database, id, eventColumn(service))).isEqualTo(original);
         assertReserved(sku, 2);
         assertOneDecision(id);
     }
 
     @ParameterizedTest(name = "{0}: restart after business commit before delivery checkpoint")
-    @MethodSource("serviceDirections") @Order(10)
+    @MethodSource("allConsumerDirections") @Order(10)
     void consumerCrashAfterBusinessCommitReplaysWithoutDuplicateEffect(String service) throws Exception {
         var sku = stock(4);
         var database = database(service);
-        inject(database, deliveryTable(service), "NEW.phase = 'COMPLETE'", true);
+        inject(database, deliveryTable(service), "NEW.phase = 'COMPLETE' AND OLD.processing_attempts > 0", true);
         UUID id;
         Source captured;
         String outcome;
         try {
             id = createOrder(List.of(line(sku, 2)));
-            captured = source(sourceTopic(service), id);
+            captured = sourceForService(service, id);
             await(() -> deliveryPhase(service, captured).equals("PROCESS")
                     && deliveryAttempts(service, captured, false) == 1
-                    && count(database, "SELECT count(*) FROM " + (service.equals("order") ? "inventory_decisions" : "inventory_reservations")
+                    && count(database, "SELECT count(*) FROM " + businessTable(service)
                     + " WHERE order_id = ?", id) == 1,
                     service + " business commit precedes failed delivery checkpoint");
             if (service.equals("order")) assertThat(status(id)).isEqualTo("CONFIRMED");
@@ -298,7 +316,7 @@ class KafkaWorkflowTests {
             assertUncommitted(captured, group(service));
             outcome = event(INVENTORY_DB, id, "correlation_id");
             var diagnosticSource = captured;
-            var diagnosticJson = service.equals("order") ? outcome : event(ORDER_DB, id, "aggregate_id");
+            var diagnosticJson = service.equals("order") ? outcome : event(ORDER_DB, id, "aggregate_id", service.equals("fulfillment") ? "OrderConfirmed" : "OrderPlaced");
             diagnostic(service, diagnosticSource, "PAUSED", diagnosticJson, 1);
             crashService(service);
         } finally { removeInjection(database, deliveryTable(service)); }
@@ -313,7 +331,7 @@ class KafkaWorkflowTests {
     }
 
     @ParameterizedTest(name = "{0}: unavailable owned database does not acknowledge source")
-    @MethodSource("serviceDirections") @Order(11)
+    @MethodSource("allConsumerDirections") @Order(11)
     void temporaryDatabaseOutageRequiresSafeProcessRecovery(String service) throws Exception {
         var sku = stock(4);
         var database = database(service);
@@ -329,9 +347,9 @@ class KafkaWorkflowTests {
         }
         docker.pauseContainerCmd(database.getContainerId()).exec();
         try {
-            if (service.equals("inventory")) id = createOrder(List.of(line(sku, 2)));
+            if (!service.equals("order")) id = createOrder(List.of(line(sku, 2)));
             else restartService("inventory");
-            captured = source(sourceTopic(service), id);
+            captured = sourceForService(service, id);
             var blockedSource = captured;
             observeBlocked(() -> assertUncommitted(blockedSource, group(service)), service + " unavailable database");
             crashService(service);
@@ -346,10 +364,10 @@ class KafkaWorkflowTests {
     }
 
     @ParameterizedTest(name = "{0}: exhausted DLT blocks its partition across JVM restart")
-    @MethodSource("serviceDirections") @Order(12) @Timeout(240)
+    @MethodSource("allConsumerDirections") @Order(12) @Timeout(240)
     void exhaustedDltPreservesPartitionOrderingAcrossRestartAndExplicitRecovery(String service) throws Exception {
         var database = database(service);
-        var dlt = sourceTopic(service) + (service.equals("order") ? ".order.dlt" : ".inventory.dlt");
+        var dlt = sourceTopic(service) + "." + service + ".dlt";
         var resource = new ConfigResource(ConfigResource.Type.TOPIC, dlt);
         var originalLimit = admin.describeConfigs(List.of(resource)).all().get(10, TimeUnit.SECONDS)
                 .get(resource).get("max.message.bytes").value();
@@ -380,7 +398,8 @@ class KafkaWorkflowTests {
             assertThat(samePartition).as("at least three distinct orderIds on the blocked partition").hasSizeGreaterThanOrEqualTo(3);
             assertThat(otherPartition).isNotEmpty();
             for (var id : otherPartition) terminal(id, "CONFIRMED");
-            for (var id : later) laterSources.put(id, source(sourceTopic(service), id));
+            for (var id : later) laterSources.put(id, sourceForService(service, id));
+            for (var id : otherPartition) committed(laterSources.get(id), group(service));
             observeBlocked(() -> assertPartitionBlocked(service, source, samePartition), service + " repeated polls while another partition progresses");
             crashService(service);
             restartService(service);
@@ -389,7 +408,7 @@ class KafkaWorkflowTests {
             for (int i = 0; i < 96 && restartMarker == null; i++) {
                 var id = createOrder(List.of(line(sku, 1)));
                 later.add(id);
-                laterSources.put(id, source(sourceTopic(service), id));
+                laterSources.put(id, sourceForService(service, id));
                 if (partition(id) == blockedPartition) samePartition.add(id);
                 else { restartMarker = id; terminal(id, "CONFIRMED"); committed(laterSources.get(id), group(service)); }
             }
@@ -403,7 +422,9 @@ class KafkaWorkflowTests {
                     + source.topic() + "' AND source_partition = " + source.partition() + " AND source_offset = " + source.offset() + " AND phase = 'PAUSED'");
             restartService(service);
             committed(source, group(service));
-            for (var id : later) { terminal(id, "CONFIRMED"); committed(laterSources.get(id), group(service)); }
+            for (var id : later) { terminal(id, "CONFIRMED"); committed(laterSources.get(id), group(service));
+                if (service.equals("fulfillment")) assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", id)).isEqualTo(1);
+            }
             assertThat(deliveryPhase(service, source)).isEqualTo("COMPLETE");
             assertThat(deliveryAttempts(service, source, true)).isEqualTo(1);
             assertThat(dltCopies(dlt, source, poison)).isEqualTo(1);
@@ -417,7 +438,7 @@ class KafkaWorkflowTests {
             for (int i = 0; i < 96 && completedMarker == null; i++) {
                 var id = createOrder(List.of(line(sku, 1)));
                 later.add(id);
-                var next = source(sourceTopic(service), id);
+                var next = sourceForService(service, id);
                 laterSources.put(id, next);
                 terminal(id, "CONFIRMED");
                 committed(next, group(service));
@@ -435,30 +456,276 @@ class KafkaWorkflowTests {
         } finally { topicLimit(resource, originalLimit); }
     }
 
+
+    @Test @Order(13)
+    void confirmationCreatesImmutablePendingSnapshotAndManualDispatchPublishesOnce() throws Exception {
+        var pending = fulfillment(sampleOrder);
+        var placementSource = source(ORDER_TOPIC, sampleOrder, "OrderPlaced");
+        var confirmationSource = source(ORDER_TOPIC, sampleOrder, "OrderConfirmed");
+        committed(placementSource, FULFILLMENT_GROUP);
+        committed(confirmationSource, FULFILLMENT_GROUP);
+        committed(confirmationSource, INVENTORY_GROUP);
+        assertThat(deliveryPhase("fulfillment", placementSource)).isEqualTo("COMPLETE");
+        assertThat(deliveryAttempts("fulfillment", placementSource, false)).isZero();
+        assertThat(deliveryAttempts("fulfillment", confirmationSource, false)).isEqualTo(1);
+        assertThat(deliveryPhase("inventory", confirmationSource)).isEqualTo("COMPLETE");
+        assertThat(deliveryAttempts("inventory", confirmationSource, false)).isZero();
+        var confirmed = JSON.readTree(event(ORDER_DB, sampleOrder, "aggregate_id", "OrderConfirmed"));
+        var reserved = JSON.readTree(event(INVENTORY_DB, sampleOrder, "correlation_id"));
+        assertThat(pending.path("status").asString()).isEqualTo("PENDING");
+        assertThat(pending.path("lines")).isEqualTo(confirmed.path("payload").path("lines"));
+        assertThat(pending.path("reservationId").asString()).isEqualTo(reserved.path("payload").path("reservationId").asString());
+        assertThat(pending.path("confirmationEventId").asString()).isEqualTo(confirmed.path("eventId").asString());
+        assertThat(confirmed.path("causationId").asString()).isEqualTo(reserved.path("eventId").asString());
+        var inventoryBefore = count(INVENTORY_DB, "SELECT COALESCE(sum(reserved),0) FROM stock_items", null);
+        var reference = "MANUAL-" + UUID.randomUUID();
+        var id = UUID.fromString(pending.path("id").asString());
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            var calls = new ArrayList<java.util.concurrent.Future<HttpResponse<String>>>();
+            for (int i = 0; i < 8; i++) calls.add(executor.submit(() -> ship(id, reference)));
+            String first = null;
+            for (var call : calls) {
+                var response = call.get(20, TimeUnit.SECONDS);
+                assertThat(response.statusCode()).isEqualTo(200);
+                if (first == null) first = response.body();
+                else assertThat(JSON.readTree(response.body())).isEqualTo(JSON.readTree(first));
+            }
+        }
+        var shipped = fulfillment(sampleOrder);
+        assertThat(shipped.path("status").asString()).isEqualTo("SHIPPED");
+        assertThat(shipped.path("lines")).isEqualTo(pending.path("lines"));
+        assertThat(ship(id, reference).statusCode()).isEqualTo(200);
+        assertThat(ship(id, "CHANGED-" + UUID.randomUUID()).statusCode()).isEqualTo(409);
+        assertThat(fulfillment(sampleOrder)).isEqualTo(shipped);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", id)).isEqualTo(1);
+        var outgoing = JSON.readTree(event(FULFILLMENT_DB, id, "aggregate_id", "FulfillmentShipped"));
+        assertThat(outgoing.has("causationId")).isFalse();
+        assertThat(outgoing.path("occurredAt").asString()).isEqualTo(shipped.path("shippedAt").asString());
+        assertThat(outgoing.path("payload").path("orderConfirmedEventId").asString()).isEqualTo(pending.path("confirmationEventId").asString());
+        assertThat(outgoing.path("payload").path("lines")).isEqualTo(pending.path("lines"));
+        assertThat(outgoing.path("payload").path("fulfillmentId").asString()).isEqualTo(id.toString());
+        assertThat(outgoing.path("payload").path("orderId").asString()).isEqualTo(sampleOrder.toString());
+        assertThat(outgoing.path("payload").path("reservationId").asString()).isEqualTo(pending.path("reservationId").asString());
+        assertThat(outgoing.path("payload").path("shipmentReference").asString()).isEqualTo(reference);
+        assertThat(outgoing.path("payload").path("shippedAt").asString()).isEqualTo(shipped.path("shippedAt").asString());
+        var observed = source(FULFILLMENT_TOPIC, sampleOrder, "FulfillmentShipped");
+        assertThat(observed.partition()).isEqualTo(partition(sampleOrder));
+        assertThat(count(INVENTORY_DB, "SELECT COALESCE(sum(reserved),0) FROM stock_items", null)).isEqualTo(inventoryBefore);
+        assertThat(status(sampleOrder)).isEqualTo("CONFIRMED");
+    }
+
+    @Test @Order(14)
+    void duplicateConfirmationAndMatchingAliasPreserveShippedOriginAcrossRestart() throws Exception {
+        var original = fulfillment(sampleOrder);
+        var json = event(ORDER_DB, sampleOrder, "aggregate_id", "OrderConfirmed");
+        committed(send(ORDER_TOPIC, sampleOrder.toString(), json), FULFILLMENT_GROUP);
+        var alias = (tools.jackson.databind.node.ObjectNode) JSON.readTree(json);
+        alias.put("eventId", UUID.randomUUID().toString());
+        alias.put("futureOptional", true);
+        committed(send(ORDER_TOPIC, sampleOrder.toString(), JSON.writeValueAsString(alias)), FULFILLMENT_GROUP);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", sampleOrder)).isEqualTo(1);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM processed_confirmations WHERE fulfillment_id = ?", UUID.fromString(original.path("id").asString()))).isEqualTo(2);
+        assertThat(fulfillment(sampleOrder)).isEqualTo(original);
+        crashService("fulfillment"); restartService("fulfillment");
+        committed(send(ORDER_TOPIC, sampleOrder.toString(), json), FULFILLMENT_GROUP);
+        assertThat(fulfillment(sampleOrder)).isEqualTo(original);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ?", sampleOrder)).isEqualTo(1);
+    }
+
+    @Test @Order(15)
+    void conflictingConfirmationAndWrongInventoryTriggerAreQuarantinedWithoutMutation() throws Exception {
+        var original = fulfillment(sampleOrder);
+        var json = (tools.jackson.databind.node.ObjectNode) JSON.readTree(event(ORDER_DB, sampleOrder, "aggregate_id", "OrderConfirmed"));
+        ((tools.jackson.databind.node.ObjectNode) json.path("payload").path("lines").get(0)).put("quantity", 99);
+        var conflictBytes = JSON.writeValueAsBytes(json);
+        var conflict = Source.of(send(ORDER_TOPIC, sampleOrder.toString(), conflictBytes));
+        committed(conflict, FULFILLMENT_GROUP);
+        assertThat(dltCopies(ORDER_TOPIC + ".fulfillment.dlt", conflict, conflictBytes)).isEqualTo(1);
+        var wrong = event(INVENTORY_DB, sampleOrder, "correlation_id").getBytes(StandardCharsets.UTF_8);
+        var wrongSource = Source.of(send(ORDER_TOPIC, sampleOrder.toString(), wrong));
+        committed(wrongSource, FULFILLMENT_GROUP);
+        assertThat(dltCopies(ORDER_TOPIC + ".fulfillment.dlt", wrongSource, wrong)).isEqualTo(1);
+        assertThat(fulfillment(sampleOrder)).isEqualTo(original);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ?", sampleOrder)).isEqualTo(1);
+    }
+
+    @ParameterizedTest @MethodSource("poisonCases") @Order(16)
+    void fulfillmentQuarantinesMalformedConfirmationWithoutMutation(String kind) throws Exception {
+        poison(ORDER_TOPIC, FULFILLMENT_GROUP, ORDER_TOPIC + ".fulfillment.dlt", kind,
+                event(ORDER_DB, sampleOrder, "aggregate_id", "OrderConfirmed"));
+    }
+
+    static Stream<String> newOutboxes() { return Stream.of("confirmation", "shipment"); }
+    @ParameterizedTest @MethodSource("newOutboxes") @Order(17)
+    void newFactPendingOutboxKeepsStoredIdentityAcrossActualJvmCrash(String stage) throws Exception {
+        var sku = stock(4);
+        var order = createOrder(List.of(line(sku, 2)));
+        terminal(order, "CONFIRMED");
+        var pending = fulfillment(order);
+        var service = stage.equals("confirmation") ? "order" : "fulfillment";
+        var database = database(service);
+        var type = stage.equals("confirmation") ? "OrderConfirmed" : "FulfillmentShipped";
+        var aggregate = stage.equals("confirmation") ? order : UUID.fromString(pending.path("id").asString());
+        // For confirmation, use a fresh order created only after blocking its typed relay attempt.
+        inject(database, "outbox_events", "NEW.event_type = '" + type + "' AND NEW.publication_attempts > OLD.publication_attempts", false);
+        String original;
+        try {
+            if (stage.equals("confirmation")) {
+                order = createOrder(List.of(line(sku, 1))); terminal(order, "CONFIRMED"); aggregate = order;
+            } else assertThat(ship(aggregate, "RECOVER-" + UUID.randomUUID()).statusCode()).isEqualTo(200);
+            original = event(database, aggregate, "aggregate_id", type);
+            assertThat(count(database, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = '" + type + "' AND published_at IS NULL AND publication_attempts = 0", aggregate)).isEqualTo(1);
+            crashService(service);
+        } finally { removeInjection(database, "outbox_events"); }
+        restartService(service);
+        var stableAggregate = aggregate;
+        await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = '" + type + "' AND published_at IS NOT NULL", stableAggregate) == 1, "new fact publication recovered");
+        assertThat(event(database, aggregate, "aggregate_id", type)).isEqualTo(original);
+        fulfillment(order);
+    }
+
+    @Test @Order(18)
+    void globallyOwnedReferenceCannotShipAnotherFulfillment() throws Exception {
+        var order = createOrder(List.of(line(stock(4), 1))); terminal(order, "CONFIRMED");
+        var pending = fulfillment(order);
+        var id = UUID.fromString(pending.path("id").asString());
+        var reference = fulfillment(sampleOrder).path("shipmentReference").asString();
+        assertThat(ship(id, reference).statusCode()).isEqualTo(409);
+        assertThat(fulfillment(order)).isEqualTo(pending);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", id)).isZero();
+    }
+
+    @Test @Order(19) @Timeout(180)
+    void fulfillmentRelayBrokerExhaustionAndRestartRequireExplicitRecovery() throws Exception {
+        var order = createOrder(List.of(line(stock(4), 1))); terminal(order, "CONFIRMED");
+        var pending = fulfillment(order);
+        var id = UUID.fromString(pending.path("id").asString());
+        var docker = DockerClientFactory.instance().client();
+        docker.pauseContainerCmd(KAFKA.getContainerId()).exec();
+        String original;
+        try {
+            assertThat(ship(id, "BROKER-" + UUID.randomUUID()).statusCode()).isEqualTo(200);
+            original = event(FULFILLMENT_DB, id, "aggregate_id", "FulfillmentShipped");
+            await(() -> count(FULFILLMENT_DB, "SELECT count(*) FROM messaging_relay_control WHERE id=1 AND paused", null) == 1,
+                    "Fulfillment five-attempt relay exhaustion", Duration.ofSeconds(90));
+            assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND publication_attempts=5 AND published_at IS NULL", id)).isEqualTo(1);
+        } finally { docker.unpauseContainerCmd(KAFKA.getContainerId()).exec(); }
+        crashService("fulfillment"); restartService("fulfillment");
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM messaging_relay_control WHERE id=1 AND paused", null)).isEqualTo(1);
+        assertThat(fulfillment(order).path("status").asString()).isEqualTo("SHIPPED");
+        stopService("fulfillment");
+        execute(FULFILLMENT_DB, "UPDATE outbox_events SET publication_attempts=0,next_attempt_at=NULL WHERE aggregate_id='" + id + "' AND published_at IS NULL");
+        execute(FULFILLMENT_DB, "UPDATE messaging_relay_control SET paused=false,failure_classification=NULL WHERE id=1");
+        restartService("fulfillment");
+        source(FULFILLMENT_TOPIC, order, "FulfillmentShipped");
+        await(() -> count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND published_at IS NOT NULL", id) == 1, "Fulfillment shipment publication resumes");
+        assertThat(event(FULFILLMENT_DB, id, "aggregate_id", "FulfillmentShipped")).isEqualTo(original);
+    }
+
+
+    @Test @Order(20)
+    void fulfillmentTechnicalFailureRollsBackAndExhaustsExactlyFourDurableAttempts() throws Exception {
+        execute(FULFILLMENT_DB, "CREATE FUNCTION workflow_insert_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic confirmation persistence fault'; END $$");
+        execute(FULFILLMENT_DB, "CREATE TRIGGER workflow_insert_fault BEFORE INSERT ON processed_confirmations FOR EACH ROW EXECUTE FUNCTION workflow_insert_fault()");
+        UUID order;
+        Source source;
+        try {
+            order = createOrder(List.of(line(stock(4), 1))); terminal(order, "CONFIRMED");
+            source = source(ORDER_TOPIC, order, "OrderConfirmed");
+            committed(source, FULFILLMENT_GROUP);
+            assertThat(deliveryPhase("fulfillment", source)).isEqualTo("COMPLETE");
+            assertThat(deliveryAttempts("fulfillment", source, false)).isEqualTo(4);
+            assertThat(deliveryAttempts("fulfillment", source, true)).isEqualTo(1);
+            assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", order)).isZero();
+            var bytes = event(ORDER_DB, order, "aggregate_id", "OrderConfirmed").getBytes(StandardCharsets.UTF_8);
+            assertThat(dltCopies(ORDER_TOPIC + ".fulfillment.dlt", source, bytes)).isEqualTo(1);
+        } finally {
+            execute(FULFILLMENT_DB, "DROP TRIGGER workflow_insert_fault ON processed_confirmations");
+            execute(FULFILLMENT_DB, "DROP FUNCTION workflow_insert_fault()");
+        }
+        crashService("fulfillment"); restartService("fulfillment");
+        assertThat(deliveryAttempts("fulfillment", source, false)).isEqualTo(4);
+        assertThat(deliveryAttempts("fulfillment", source, true)).isEqualTo(1);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", order)).isZero();
+        // Explicit redelivery after remediation has a new source offset but the same stored event identity.
+        committed(send(ORDER_TOPIC, order.toString(), event(ORDER_DB, order, "aggregate_id", "OrderConfirmed")), FULFILLMENT_GROUP);
+        fulfillment(order);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", order)).isEqualTo(1);
+    }
+
+    @Test @Order(21)
+    void manualShipOutboxInsertionFailureRollsBackStatusAndSameCommandRecovers() throws Exception {
+        var order = createOrder(List.of(line(stock(4), 1))); terminal(order, "CONFIRMED");
+        var pending = fulfillment(order);
+        var id = UUID.fromString(pending.path("id").asString());
+        var reference = "ROLLBACK-" + UUID.randomUUID();
+        execute(FULFILLMENT_DB, "CREATE FUNCTION workflow_insert_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic shipment outbox fault'; END $$");
+        execute(FULFILLMENT_DB, "CREATE TRIGGER workflow_insert_fault BEFORE INSERT ON outbox_events FOR EACH ROW EXECUTE FUNCTION workflow_insert_fault()");
+        try {
+            assertThat(ship(id, reference).statusCode()).isEqualTo(500);
+            assertThat(fulfillment(order)).isEqualTo(pending);
+            assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", id)).isZero();
+        } finally {
+            execute(FULFILLMENT_DB, "DROP TRIGGER workflow_insert_fault ON outbox_events");
+            execute(FULFILLMENT_DB, "DROP FUNCTION workflow_insert_fault()");
+        }
+        assertThat(ship(id, reference).statusCode()).isEqualTo(200);
+        assertThat(fulfillment(order).path("status").asString()).isEqualTo("SHIPPED");
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", id)).isEqualTo(1);
+    }
+
+    private static void caughtUp(String group, String topic) throws Exception {
+        var requested = new java.util.LinkedHashMap<TopicPartition, org.apache.kafka.clients.admin.OffsetSpec>();
+        for (int i = 0; i < 3; i++) requested.put(new TopicPartition(topic, i), org.apache.kafka.clients.admin.OffsetSpec.latest());
+        var ends = admin.listOffsets(requested).all().get(10, TimeUnit.SECONDS);
+        await(() -> {
+            try {
+                var committed = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS);
+                return ends.entrySet().stream().allMatch(entry -> entry.getValue().offset() == 0
+                        || committed.containsKey(entry.getKey()) && committed.get(entry.getKey()).offset() >= entry.getValue().offset());
+            } catch (Exception failure) { return false; }
+        }, "independent consumer group caught up before no-mutation snapshot");
+    }
+
+    private static tools.jackson.databind.JsonNode fulfillment(UUID order) throws Exception {
+        await(() -> request(fulfillmentPort, "/api/fulfillments/orders/" + order, "GET", null).statusCode() == 200, "confirmed order creates fulfillment");
+        return JSON.readTree(request(fulfillmentPort, "/api/fulfillments/orders/" + order, "GET", null).body());
+    }
+    private static HttpResponse<String> ship(UUID id, String reference) {
+        return request(fulfillmentPort, "/api/fulfillments/" + id + "/ship", "POST", JSON.writeValueAsString(Map.of("shipmentReference", reference)));
+    }
+
     private record Source(String topic, int partition, long offset) {
         static Source of(RecordMetadata record) { return new Source(record.topic(), record.partition(), record.offset()); }
     }
-    private static PostgreSQLContainer database(String service) { return service.equals("order") ? ORDER_DB : INVENTORY_DB; }
-    private static String deliveryTable(String service) { return service.equals("order") ? "messaging_deliveries" : "consumer_delivery_state"; }
+    private static PostgreSQLContainer database(String service) { return service.equals("order") ? ORDER_DB : service.equals("inventory") ? INVENTORY_DB : FULFILLMENT_DB; }
+    private static String businessTable(String service) { return service.equals("order") ? "inventory_decisions" : service.equals("inventory") ? "inventory_reservations" : "fulfillments"; }
+    private static Source sourceForService(String service, UUID id) throws Exception { return source(sourceTopic(service), id, service.equals("fulfillment") ? "OrderConfirmed" : null); }
+    private static String deliveryTable(String service) { return service.equals("inventory") ? "consumer_delivery_state" : "messaging_deliveries"; }
+    private static String eventType(String service) { return service.equals("order") ? "OrderPlaced" : "InventoryReserved"; }
     private static String eventColumn(String service) { return service.equals("order") ? "aggregate_id" : "correlation_id"; }
     private static String sourceTopic(String service) { return service.equals("order") ? INVENTORY_TOPIC : ORDER_TOPIC; }
-    private static String group(String service) { return service.equals("order") ? ORDER_GROUP : INVENTORY_GROUP; }
+    private static String group(String service) { return service.equals("order") ? ORDER_GROUP : service.equals("inventory") ? INVENTORY_GROUP : FULFILLMENT_GROUP; }
     private static int partition(UUID id) { return org.apache.kafka.common.utils.Utils.toPositive(org.apache.kafka.common.utils.Utils.murmur2(id.toString().getBytes(StandardCharsets.UTF_8))) % 3; }
-    private static void stopService(String service) throws Exception { stopProcess(service.equals("order") ? orderProcess : inventoryProcess); }
+    private static Process process(String service) { return service.equals("order") ? orderProcess : service.equals("inventory") ? inventoryProcess : fulfillmentProcess; }
+    private static void stopService(String service) throws Exception { stopProcess(process(service)); }
     private static void crashService(String service) throws Exception {
-        var process = service.equals("order") ? orderProcess : inventoryProcess;
+        var process = process(service);
         process.destroyForcibly();
         assertThat(process.waitFor(10, TimeUnit.SECONDS)).as("owned %s JVM terminated", service).isTrue();
     }
     private static void restartService(String service) throws Exception {
         stopService(service);
         if (service.equals("order")) { orderProcess = startService(service, orderPort, ORDER_DB); health(orderPort, orderProcess); }
-        else { inventoryProcess = startService(service, inventoryPort, INVENTORY_DB); health(inventoryPort, inventoryProcess); }
+        else if (service.equals("inventory")) { inventoryProcess = startService(service, inventoryPort, INVENTORY_DB); health(inventoryPort, inventoryProcess); }
+        else { fulfillmentProcess = startService(service, fulfillmentPort, FULFILLMENT_DB); health(fulfillmentPort, fulfillmentProcess); }
     }
     private static void assertOneDecision(UUID id) {
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations WHERE order_id = ?", id)).isEqualTo(1);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ?", id)).isEqualTo(1);
         assertThat(count(ORDER_DB, "SELECT count(*) FROM inventory_decisions WHERE order_id = ?", id)).isEqualTo(1);
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = 'OrderPlaced'", id)).isEqualTo(1);
+        assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = 'OrderConfirmed'", id)).isEqualTo(1);
     }
     private static String sourcePredicate(Source source) {
         return "source_topic = '" + source.topic() + "' AND source_partition = " + source.partition() + " AND source_offset = " + source.offset();
@@ -472,13 +739,14 @@ class KafkaWorkflowTests {
     private static long deliveryAttempts(String service, Source source, boolean dlt) {
         return count(database(service), "SELECT " + (dlt ? "dlt_attempts" : "processing_attempts") + " FROM " + deliveryTable(service) + " WHERE " + sourcePredicate(source), null);
     }
-    private static Source source(String topic, UUID id) throws Exception {
+    private static Source source(String topic, UUID id) throws Exception { return source(topic, id, null); }
+    private static Source source(String topic, UUID id, String eventType) throws Exception {
         try (var observer = dltConsumer(topic)) {
             var partitions = List.of(new TopicPartition(topic, 0), new TopicPartition(topic, 1), new TopicPartition(topic, 2));
             observer.assign(partitions); observer.seekToBeginning(partitions);
             var deadline = System.nanoTime() + Duration.ofSeconds(40).toNanos();
             while (System.nanoTime() < deadline) for (var record : observer.poll(Duration.ofMillis(200))) {
-                if (id.toString().equals(record.key())) {
+                if (id.toString().equals(record.key()) && (eventType == null || JSON.readTree(record.value()).path("eventType").asString().equals(eventType))) {
                     assertThat(record.partition()).as("orderId key maps to its Kafka partition").isEqualTo(partition(id));
                     return new Source(topic, record.partition(), record.offset());
                 }
@@ -509,8 +777,8 @@ class KafkaWorkflowTests {
         assertUncommitted(source, group(service));
         assertThat(deliveryPhase(service, source)).isEqualTo("PAUSED");
         for (var id : ids) {
-            assertThat(status(id)).isEqualTo("PENDING_INVENTORY");
-            assertThat(count(database(service), "SELECT count(*) FROM " + (service.equals("order") ? "inventory_decisions" : "inventory_reservations") + " WHERE order_id = ?", id)).isZero();
+            assertThat(status(id)).isEqualTo(service.equals("fulfillment") ? "CONFIRMED" : "PENDING_INVENTORY");
+            assertThat(count(database(service), "SELECT count(*) FROM " + businessTable(service) + " WHERE order_id = ?", id)).isZero();
         }
     }
     private static void inject(PostgreSQLContainer db, String table, String predicate, boolean suppress) throws Exception {
@@ -538,7 +806,7 @@ class KafkaWorkflowTests {
                 return Files.readAllLines(Path.of("target", service + ".log")).stream().anyMatch(line ->
                         field(line, "state", state) && field(line, "partition", Integer.toString(source.partition()))
                         && field(line, "offset", Long.toString(source.offset()))
-                        && field(line, service.equals("order") ? "attempt" : state.equals("PAUSED") && expected != null ? "processingAttempt" : "dltAttempt", Integer.toString(attempt))
+                        && field(line, !service.equals("inventory") ? "attempt" : state.equals("PAUSED") && expected != null ? "processingAttempt" : "dltAttempt", Integer.toString(attempt))
                         && field(line, "eventId", expected == null ? "null" : expected.path("eventId").asString())
                         && field(line, "eventType", expected == null ? "null" : expected.path("eventType").asString())
                         && field(line, "orderId", expected == null ? "null" : expected.path("payload").path("orderId").asString()));
@@ -550,7 +818,7 @@ class KafkaWorkflowTests {
         return java.util.regex.Pattern.compile("(?:^|[ ,])" + name + "=" + java.util.regex.Pattern.quote(value) + "(?:[ ,]|$)").matcher(line).find();
     }
     private static void noUnsafePayloadLogs() throws Exception {
-        for (var service : List.of("order", "inventory")) {
+        for (var service : List.of("order", "inventory", "fulfillment")) {
             assertThat(Files.readString(Path.of("target", service + ".log")))
                     .as("%s logs omit unsafe poison bytes", service).doesNotContain(UNSAFE_MARKER);
         }
@@ -576,6 +844,10 @@ class KafkaWorkflowTests {
     }
 
     private void poison(String topic, String group, String dlt, String kind, String valid) throws Exception {
+        caughtUp(FULFILLMENT_GROUP, ORDER_TOPIC);
+        var fulfillmentCount = count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments", null);
+        var shipmentEvents = count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events", null);
+        var confirmations = count(FULFILLMENT_DB, "SELECT count(*) FROM processed_confirmations", null);
         var orderCount = count(ORDER_DB, "SELECT count(*) FROM orders", null);
         var reservationCount = count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations", null);
         var orderEvents = count(ORDER_DB, "SELECT count(*) FROM outbox_events", null);
@@ -595,16 +867,27 @@ class KafkaWorkflowTests {
                     .replace("\"eventVersion\":1", "\"eventVersion\":99,\"eventVersion\":1").getBytes(StandardCharsets.UTF_8);
             default -> valid.getBytes(StandardCharsets.UTF_8);
         };
+        // Historical identical poison has no usable eventId; its source coordinates distinguish this delivery.
+        var historical = group.equals(FULFILLMENT_GROUP) && (kind.equals("malformed") || kind.equals("utf8"))
+                ? send(topic, key, value) : null;
+        if (historical != null) committed(historical, group);
         var metadata = send(topic, key, value);
         try (var consumer = dltConsumer(dlt)) {
             var partitions = List.of(new TopicPartition(dlt, 0), new TopicPartition(dlt, 1), new TopicPartition(dlt, 2));
             consumer.assign(partitions);
             consumer.seekToBeginning(partitions);
             var found = false;
+            var historicalFound = false;
             var deadline = System.nanoTime() + Duration.ofSeconds(40).toNanos();
             while (!found && System.nanoTime() < deadline) {
                 for (var record : consumer.poll(Duration.ofMillis(200))) {
                     if (key.equals(record.key()) && java.util.Arrays.equals(value, record.value())) {
+                        if (historical != null && matchesDltSource(record, historical, group)) {
+                            assertThat(matchesDltSource(record, metadata, group)).as("historical identical bytes are not the current delivery").isFalse();
+                            historicalFound = true;
+                        }
+                        if (!matchesDltSource(record, metadata, group)) continue;
+                        if (historical != null) assertDltSourceIdentity(record, metadata, group);
                         assertThat(record.partition()).isEqualTo(metadata.partition());
                         assertThat(header(record, "warexis-source-topic")).isEqualTo(metadata.topic());
                         assertThat(header(record, "warexis-source-partition")).isEqualTo(Integer.toString(metadata.partition()));
@@ -618,11 +901,15 @@ class KafkaWorkflowTests {
                     }
                 }
             }
-            assertThat(found).as("DLT retains original %s bytes", kind).isTrue();
+            assertThat(found).as("DLT retains original %s bytes for the current source delivery", kind).isTrue();
+            if (historical != null) assertThat(historicalFound).as("observer examined the earlier identical DLT record").isTrue();
         }
         committed(metadata, group);
         assertThat(count(ORDER_DB, "SELECT count(*) FROM orders", null)).isEqualTo(orderCount);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations", null)).isEqualTo(reservationCount);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments", null)).isEqualTo(fulfillmentCount);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events", null)).isEqualTo(shipmentEvents);
+        assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM processed_confirmations", null)).isEqualTo(confirmations);
         assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events", null)).isEqualTo(orderEvents);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM outbox_events", null)).isEqualTo(inventoryEvents);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM stock_items", null)).isEqualTo(stockRows);
@@ -704,7 +991,13 @@ class KafkaWorkflowTests {
         } catch (Exception failure) { throw new IllegalStateException("SQL observation failed", failure); }
     }
     private static String event(PostgreSQLContainer database, UUID id, String column) {
-        try (var connection = DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword()); var query = connection.prepareStatement("SELECT event_json::text FROM outbox_events WHERE " + column + " = ?")) {
+        return event(database, id, column, database == ORDER_DB ? "OrderPlaced" : "InventoryReserved", database == ORDER_DB);
+    }
+    private static String event(PostgreSQLContainer database, UUID id, String column, String type) {
+        return event(database, id, column, type, true);
+    }
+    private static String event(PostgreSQLContainer database, UUID id, String column, String type, boolean typed) {
+        try (var connection = DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword()); var query = connection.prepareStatement("SELECT event_json::text FROM outbox_events WHERE " + column + " = ?" + (typed ? " AND event_type = '" + type + "'" : ""))) {
             query.setObject(1, id);
             try (var result = query.executeQuery()) { assertThat(result.next()).isTrue(); return result.getString(1); }
         } catch (Exception failure) { throw new IllegalStateException("Event observation failed", failure); }
@@ -715,6 +1008,30 @@ class KafkaWorkflowTests {
     private static void committed(RecordMetadata source, String group) throws Exception {
         var partition = new TopicPartition(source.topic(), source.partition());
         await(() -> { try { var offset = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(5, TimeUnit.SECONDS).get(partition); return offset != null && offset.offset() > source.offset(); } catch (Exception failure) { return false; } }, "source offset committed after processing/DLT");
+    }
+    private static boolean matchesDltSource(org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record,
+            RecordMetadata source, String group) {
+        return headerEquals(record, "warexis-source-topic", source.topic())
+                && headerEquals(record, "warexis-source-partition", Integer.toString(source.partition()))
+                && headerEquals(record, "warexis-source-offset", Long.toString(source.offset()))
+                && headerEquals(record, "warexis-consumer-group", group);
+    }
+    private static boolean headerEquals(org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record,
+            String name, String expected) {
+        var header = record.headers().lastHeader(name);
+        return header != null && header.value() != null && expected.equals(new String(header.value(), StandardCharsets.UTF_8));
+    }
+    private static void assertDltSourceIdentity(org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> current,
+            RecordMetadata source, String group) {
+        assertThat(matchesDltSource(current, source, group)).isTrue();
+        for (var name : List.of("warexis-source-topic", "warexis-source-partition", "warexis-source-offset", "warexis-consumer-group")) {
+            var candidate = new org.apache.kafka.clients.consumer.ConsumerRecord<>(current.topic(), current.partition(), current.offset(), current.key(), current.value());
+            current.headers().forEach(header -> candidate.headers().add(header));
+            candidate.headers().remove(name);
+            assertThat(matchesDltSource(candidate, source, group)).as("absent %s cannot identify the current delivery", name).isFalse();
+            candidate.headers().add(name, "different-source".getBytes(StandardCharsets.UTF_8));
+            assertThat(matchesDltSource(candidate, source, group)).as("different %s cannot identify the current delivery", name).isFalse();
+        }
     }
     private static String header(org.apache.kafka.clients.consumer.ConsumerRecord<String, byte[]> record, String name) {
         var header = record.headers().lastHeader(name);

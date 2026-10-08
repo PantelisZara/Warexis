@@ -1,6 +1,6 @@
 # ADR 0005: Fulfillment ownership and manual dispatch
 
-Status: Accepted for Phase 6; runtime implementation and verification are separate gates.
+Status: Accepted and implemented. Verified with service tests and the local packaged three-service workflow.
 
 ## Context
 
