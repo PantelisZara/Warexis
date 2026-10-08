@@ -1,6 +1,6 @@
-# Running and recovering the Order/Inventory Kafka workflow
+# Running and recovering the three-service Kafka workflow
 
-Kafka adapters are opt-in. Both services default to `WAREXIS_MESSAGING_ENABLED=false`.
+Kafka adapters are opt-in. All three services default to `WAREXIS_MESSAGING_ENABLED=false`.
 Set `WAREXIS_MESSAGING_ENABLED=true` and `KAFKA_BOOTSTRAP_SERVERS` for each service
 process to enable its publisher and listener. Follow the
 [local infrastructure guide](../../infrastructure/local/README.md) to start the
@@ -8,7 +8,7 @@ local PostgreSQL databases, Kafka broker, and host services. The unauthenticated
 APIs bind to loopback in those recipes.
 
 Enabled services provision the three-partition, single-replica development topics
-from [ADR 0004](adr/0004-message-topology-and-delivery-semantics.md). These settings
+from [ADR 0004](adr/0004-message-topology-and-delivery-semantics.md) and the Fulfillment extension in [ADR 0005](adr/0005-fulfillment-and-manual-dispatch.md). These settings
 are local development defaults, not a production durability plan. Kafka uses
 plaintext local transport. Database ownership stays separate; no service reads
 another service's database.
@@ -19,9 +19,25 @@ Inventory validates the byte-array transport as strict UTF-8 JSON and calls its
 transactional reservation application service. Its outcome outbox relay publishes
 `InventoryReserved` or `InventoryRejected`. Order validates outcome identities,
 causation, original lines, and permitted state transitions before atomically
-recording deduplication and changing the order to `CONFIRMED` or `REJECTED`.
-Poll `GET /api/orders/{id}` for the final decision. Confirmation records a stock
-reservation; it does not deduct stock again or implement fulfillment.
+recording the decision, deduplication and terminal state. Success also records one
+`OrderConfirmed` outbox fact; rejection does not. Poll `GET /api/orders/{id}` for
+the final inventory decision.
+
+Fulfillment's independent Order-stream group creates one `PENDING` plan from
+`OrderConfirmed`, preserving the original reservation and ordered lines. Poll
+`GET /api/fulfillments/orders/{orderId}`; it can return 404 before asynchronous
+planning completes. `POST /api/fulfillments/{id}/ship` with
+`{"shipmentReference":"MANUAL-001"}` commits `SHIPPED` and one
+`FulfillmentShipped` outbox fact. The reference is internal, case-sensitive, and
+unique within Fulfillment. Identical repeats preserve the first result; changed
+terminal references or reference reuse return 409. Order stays `CONFIRMED`;
+dispatch does not deduct stock or contact a carrier. No current service consumes
+`FulfillmentShipped`.
+
+Inventory validates and acknowledges recognized `OrderConfirmed` without business
+processing. Fulfillment validates and acknowledges `OrderPlaced` without planning.
+Their independent groups have separate offsets and DLTs. Install Inventory's
+compatibility before enabling Order's new confirmation producer.
 
 `eventId` identifies a message; `orderId` enforces one business reservation
 decision. Database constraints and transaction locks protect those identities.
@@ -39,7 +55,9 @@ commit, or after confirmed DLT publication and durable delivery completion.
 Byte-array keys/values let DLTs retain malformed UTF-8 and unparseable payloads. DLT headers use `warexis-source-topic`,
 `warexis-source-partition`, `warexis-source-offset`, `warexis-consumer-group`,
 `warexis-failure-code`, `warexis-processing-attempts`, `warexis-dlt-attempts`, and
-`warexis-failed-at`. No DLT redrive consumer or cleanup task runs automatically.
+`warexis-failed-at`. Identify a DLT record by the complete source topic, partition,
+offset, and consumer group; identical payloads and keys can belong to earlier
+source deliveries. No DLT redrive consumer or cleanup task runs automatically.
 
 ## Bounded failure handling
 
@@ -65,10 +83,11 @@ rows, and delivery state to diagnose a pending order or paused stream.
 | --- | --- | --- |
 | Order | `messaging_relay_control` (`id = 1`) | `messaging_deliveries` |
 | Inventory | `outbox_relay_control` (`singleton = true`) | `consumer_delivery_state` |
+| Fulfillment | `messaging_relay_control` (`id = 1`) | `messaging_deliveries` |
 
-Both outboxes expose `publication_attempts`, `next_attempt_at`, and `published_at`.
+All three outboxes expose `publication_attempts`, `next_attempt_at`, and `published_at`.
 Delivery rows retain source topic/partition/offset, phase, processing/DLT attempt
-counts, and due time. Inventory includes the consumer group in its key; Order has
+counts, and due time. Inventory and Fulfillment include the consumer group in their keys; Order has
 one fixed outcome group per owned database. No retention or deletion policy is
 implemented, so do not manually remove deduplication/decision records while
 replay remains possible.
@@ -92,6 +111,7 @@ WHERE id = 1;
 COMMIT;
 ```
 
+Fulfillment uses the same relay recovery SQL as Order, in its own database.
 In Inventory, use the same outbox update and replace the control update with:
 
 ```sql
@@ -121,6 +141,17 @@ WHERE consumer_group = 'warexis.inventory.order-events.v1'
   AND phase = 'PAUSED';
 ```
 
+In Fulfillment, use its owned database and independent group:
+
+```sql
+UPDATE messaging_deliveries
+SET phase = 'DLT', dlt_attempts = 0, next_attempt_at = NULL
+WHERE consumer_group = 'warexis.fulfillment.order-events.v1'
+  AND source_topic = 'warexis.order.events.v1'
+  AND source_partition = REPLACE_PARTITION AND source_offset = REPLACE_OFFSET
+  AND phase = 'PAUSED';
+```
+
 If delivery metadata was unavailable, repair the database and inspect the persisted
 phase/counters before restarting; do not assume the application transaction failed.
 A broker-acknowledged publication or committed application operation can replay
@@ -139,15 +170,21 @@ inputs and concurrent duplicate event IDs or same-order aliases, and reconcile
 stock against committed reservation lines. Test-only database faults verify
 rollback at stock, reservation, processed-event and outbox persistence boundaries.
 
-The packaged suite runs actual executable JARs and checks both service directions
+The packaged suite runs actual executable JARs and checks all three consumer directions
 for pending-outbox recovery, forced termination after business commit but before
 successful delivery checkpoint, temporary database outage with uncommitted source
 offsets, and exhausted DLT budgets. It proves a paused partition remains blocked
 across polls and JVM restart while another partition progresses. Explicit recovery
 then completes several later order IDs on the same partition. Restarting again
 with a new same-partition record proves completed DLT state does not resurrect.
-The broker-outage scenario also retains unpublished event identity and an exhausted
-relay budget across Order restart until explicit operator recovery.
+Broker-outage scenarios also retain unpublished event identity and an exhausted
+relay budget across Order or Fulfillment restart until explicit operator recovery.
+The 47-case packaged suite preserves the original 28 Order/Inventory cases and
+adds confirmation, manual dispatch, duplicate/alias/conflict handling, immutable
+shipment origin, reference ownership, pending confirmation/shipment outbox
+recovery, technical rollback, and Fulfillment restart/DLT/paused-partition checks.
+These run against the current three executable JARs, separately from full service
+unit and integration lifecycles.
 
 These checks establish at-least-once delivery with idempotent local effects for
 the tested boundaries. Broker acceptance before a database publication checkpoint,
