@@ -3,7 +3,8 @@
 This is a loopback development setup. Keycloak 26.8.0 runs `start-dev --import-realm`
 with a separate PostgreSQL 18.6 database and persistent volume. Its management port
 9000 and identity database port are not published. This setup does not provide
-production TLS, production identity operations or browser login.
+production TLS or production identity operations. The local browser client below
+uses Authorization Code with PKCE for the operations frontend.
 
 Use the [local infrastructure instructions](../local/README.md) with an ignored,
 trusted `.env`. Replace the public example passwords and bootstrap service-account
@@ -25,8 +26,9 @@ export WAREXIS_OAUTH2_AUDIENCE=warexis-api
 
 The realm import defines `WAREXIS_VIEWER`, `WAREXIS_OPERATOR` (a composite including
 VIEWER), a bearer-only `warexis-api` audience client, and explicit `roles` and
-`warexis-api` client scopes. The latter adds the API audience to access tokens;
-the former maps scoped realm roles into `realm_access.roles`. There are no imported
+`warexis-api` client scopes, plus a dedicated public `warexis-operations` browser
+client. The `warexis-api` scope adds the API audience to access tokens; `roles` maps
+scoped realm roles into `realm_access.roles`. There are no imported
 users, confidential test clients or client secrets. Startup import skips an
 existing realm; editing the JSON does not silently replace persistent identity data.
 Keycloak and identity PostgreSQL restart persistence is covered by local verification.
@@ -112,5 +114,90 @@ Normal service tests use ephemeral test-only RSA credentials and need no Keycloa
 `scripts/verify-workflow.sh` runs those cases plus the preserved Kafka/PostgreSQL
 workflow. Their test clients use runtime-generated secrets and do not use password
 grants. The services remain stateless Bearer resource servers: OIDC discovery is
-for issuer/key configuration, not implemented backend user sessions. Future browser
-access will use Authorization Code with PKCE; no frontend client/login is provided here.
+for issuer/key configuration, not implemented backend user sessions. The browser
+client uses Authorization Code with PKCE; its real-browser verification is a
+separate gate.
+
+## Operations browser client
+
+`warexis-operations` is a public OpenID Connect client with standard Code flow and
+server-enforced PKCE `S256`. Implicit flow, direct password grants, service accounts
+and full role scope are disabled. It has no client secret. Its default client scopes
+are exactly `roles` and `warexis-api`, with explicit `WAREXIS_VIEWER` and
+`WAREXIS_OPERATOR` realm-role scope mappings. Scope mappings permit claims only for
+roles the user actually owns; they do not grant either role to a user. OPERATOR
+continues to include VIEWER through the existing realm composite.
+
+The only allowed web origin is `http://127.0.0.1:5173`. The login and post-logout
+redirect URI is exactly `http://127.0.0.1:5173/`, with no wildcard. Login initiated on
+a nested frontend route must still pass that exact root redirect to Keycloak.
+Use the root redirect explicitly for logout too. The adapter must use Code flow,
+`pkceMethod: 'S256'`, and in-memory tokens; it must not persist access/refresh tokens
+in local storage, session storage, IndexedDB or application cookies. The frontend
+refreshes before protected API calls and uses its development proxy to reach the
+three APIs. This addition does not enable backend CORS or change API authorization.
+
+Open both the UI and identity server using `127.0.0.1`, not `localhost`. Their
+origins and the issuer are exact strings: `http://localhost:18080/realms/warexis`
+does not match the configured `http://127.0.0.1:18080/realms/warexis` issuer.
+If using a non-default local Keycloak port, set the frontend's public Keycloak URL
+and all three service issuer values consistently; the UI origin and redirects stay
+at `http://127.0.0.1:5173` unless intentionally reconfigured and reviewed.
+
+### New or existing local identity data
+
+A new database imports the browser client and its scope mapping from
+`warexis-realm.json`. An existing `warexis` realm is skipped by startup import.
+Do not reset the realm, delete its database or remove volumes to apply this change.
+Use the narrow local administrative procedure below instead. It only creates or
+updates `warexis-operations` and its own scope attachments; it does not alter shared
+roles/mappers, the `warexis-api` client, users or other clients.
+
+```sh
+python3 infrastructure/auth/configure-browser-client.py check
+python3 -m unittest discover -s infrastructure/auth -p 'test_*.py'
+python3 infrastructure/auth/configure-browser-client.py sync-client
+```
+
+The sync command prompts for the local administrative service-account secret; no
+secret or token is printed or written. It uses the temporary bootstrap client by
+default. If it was already removed, provide an existing authorized local master
+realm administrative service-account client ID with `--admin-client`; its secret is
+still prompted. It must have permission to read the realm, roles/scopes and manage
+this client. The script rejects remote URLs, refuses to repurpose a confidential or
+service-account client, and stops on unexpected existing realm/client-role scope
+mappings for manual review. A rerun is safe: the same exact client settings/scopes
+are reapplied and checked through Admin REST. No realm reset is performed.
+
+`--url http://127.0.0.1:<port>` selects a non-default local identity port. An existing
+client's extra default/optional scope attachments are removed only from that browser
+client to restore its explicit scope boundary. Unexpected role scope mappings must
+be investigated before continuing; the script does not silently delete them.
+
+### Local browser users
+
+Do not add users or passwords to the realm import. To create a new local user,
+choose the least privilege role needed and enter a password at the prompts:
+
+```sh
+python3 infrastructure/auth/configure-browser-client.py create-user \
+  --username local-viewer --role WAREXIS_VIEWER
+python3 infrastructure/auth/configure-browser-client.py create-user \
+  --username local-operator --role WAREXIS_OPERATOR
+```
+
+Passwords stay in process memory and are sent only to the loopback Admin REST
+endpoint. Existing users are never overwritten. The command creates the requested
+user with one realm role; additional profile requirements may be completed through
+the Keycloak login screen. Review the new user in the local Admin Console if an
+administrative request fails after creation. Use the console to manage existing
+users or an authorized administrative service-account client, and remove temporary
+bootstrap credentials when provisioning is finished. Never use real user credentials
+in disposable browser verification or commit local passwords/secrets.
+
+The configuration guard and Admin REST checks establish the imported/provisioned
+identity settings. Successful browser login, callback, refresh, role-specific API
+access and logout still require the real-browser end-to-end gate; they cannot be
+claimed from these configuration checks alone. See the official
+[JavaScript adapter guidance](https://www.keycloak.org/securing-apps/javascript-adapter)
+and [Admin REST API](https://www.keycloak.org/docs-api/26.8.0/rest-api/index.html).
