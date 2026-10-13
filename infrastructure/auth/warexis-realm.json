@@ -1,0 +1,81 @@
+{
+  "realm": "warexis",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "WAREXIS_VIEWER",
+        "description": "Read Warexis business resources"
+      },
+      {
+        "name": "WAREXIS_OPERATOR",
+        "description": "Read and operate Warexis business resources",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "WAREXIS_VIEWER"
+          ]
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "warexis-api",
+      "name": "Warexis API audience",
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [],
+      "optionalClientScopes": []
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "warexis-api",
+      "description": "Access-token audience for authorized Warexis API clients",
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "warexis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "warexis-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "description": "Explicit realm-role claims for authorized API clients",
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ]
+}
