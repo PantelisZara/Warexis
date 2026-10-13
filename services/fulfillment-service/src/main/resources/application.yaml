@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: warexis-fulfillment-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${WAREXIS_OAUTH2_ISSUER_URI}
+          audiences: ${WAREXIS_OAUTH2_AUDIENCE}
   jackson:
     mapper:
       allow-coercion-of-scalars: false
