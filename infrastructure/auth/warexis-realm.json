@@ -37,6 +37,34 @@
       "fullScopeAllowed": false,
       "defaultClientScopes": [],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "warexis-operations",
+      "name": "Warexis operations browser",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [
+        "http://127.0.0.1:5173/"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://127.0.0.1:5173/"
+      },
+      "defaultClientScopes": [
+        "roles",
+        "warexis-api"
+      ],
+      "optionalClientScopes": []
     }
   ],
   "clientScopes": [
@@ -75,6 +103,15 @@
             "jsonType.label": "String"
           }
         }
+      ]
+    }
+  ],
+  "scopeMappings": [
+    {
+      "client": "warexis-operations",
+      "roles": [
+        "WAREXIS_VIEWER",
+        "WAREXIS_OPERATOR"
       ]
     }
   ]
