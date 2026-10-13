@@ -28,6 +28,8 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -198,12 +200,14 @@ class OrderServiceApplicationTests {
         try (var client = HttpClient.newHttpClient()) {
             var uri = URI.create("http://localhost:" + port + "/api/orders");
             var put = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + TestJwtTokens.operator())
                     .header("Content-Type", "application/json").PUT(HttpRequest.BodyPublishers.ofString("{}"))
                     .build();
             var putResponse = client.send(put, HttpResponse.BodyHandlers.ofString());
-            assertProblem(putResponse, 405);
-            assertThat(putResponse.headers().firstValue("Allow").orElseThrow()).contains("POST");
+            // Undefined methods are deliberately denied before reaching MVC.
+            assertProblem(putResponse, 403);
             var unsupported = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + TestJwtTokens.operator())
                     .header("Content-Type", "text/plain").POST(HttpRequest.BodyPublishers.ofString("{}"))
                     .build();
             assertProblem(client.send(unsupported, HttpResponse.BodyHandlers.ofString()), 415);
@@ -254,7 +258,8 @@ class OrderServiceApplicationTests {
 
     private HttpResponse<String> post(String body) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/orders"))
-                .timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TestJwtTokens.operator())
+                .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build();
         try (var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()) {
             return client.send(request, HttpResponse.BodyHandlers.ofString());
@@ -263,7 +268,7 @@ class OrderServiceApplicationTests {
 
     private HttpResponse<String> get(String path) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
-                .timeout(Duration.ofSeconds(10)).GET().build();
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TestJwtTokens.operator()).GET().build();
         try (var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()) {
             return client.send(request, HttpResponse.BodyHandlers.ofString());
         }
@@ -280,6 +285,12 @@ class OrderServiceApplicationTests {
 
     @TestConfiguration(proxyBeanMethods = false)
     static class PostgresConfiguration {
+
+        @Bean
+        @Primary
+        JwtDecoder testJwtDecoder() throws com.nimbusds.jose.JOSEException {
+            return TestJwtTokens.decoder();
+        }
 
         @Bean
         @ServiceConnection
