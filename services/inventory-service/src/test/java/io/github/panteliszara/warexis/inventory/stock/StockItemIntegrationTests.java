@@ -36,6 +36,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@org.springframework.test.context.TestPropertySource(properties = {"WAREXIS_OAUTH2_ISSUER_URI=https://issuer.test/realms/warexis", "WAREXIS_OAUTH2_AUDIENCE=warexis-api"})
+@org.springframework.context.annotation.Import(io.github.panteliszara.warexis.inventory.security.TestJwtConfiguration.class)
 @Testcontainers
 class StockItemIntegrationTests {
 
@@ -242,7 +244,8 @@ class StockItemIntegrationTests {
 
     private HttpResponse<String> request(String method, String suffix, String body) throws Exception {
         var builder = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/stock-items" + suffix))
-                .timeout(Duration.ofSeconds(10));
+                .timeout(Duration.ofSeconds(10))
+                .header("Authorization", "Bearer " + io.github.panteliszara.warexis.inventory.security.TestJwtConfiguration.operatorToken());
         builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body));
         if (body != null) {
             builder.header("Content-Type", "application/json");

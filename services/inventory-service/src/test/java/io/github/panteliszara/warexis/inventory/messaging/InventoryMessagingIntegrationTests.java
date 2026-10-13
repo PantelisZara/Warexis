@@ -49,6 +49,8 @@ import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {"warexis.messaging.enabled=true", "warexis.messaging.retry-base-delay=10ms",
         "warexis.messaging.poll-interval=24h", "spring.kafka.listener.auto-startup=false"})
+@org.springframework.test.context.TestPropertySource(properties = {"WAREXIS_OAUTH2_ISSUER_URI=https://issuer.test/realms/warexis", "WAREXIS_OAUTH2_AUDIENCE=warexis-api"})
+@org.springframework.context.annotation.Import(io.github.panteliszara.warexis.inventory.security.TestJwtConfiguration.class)
 @Testcontainers
 @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 class InventoryMessagingIntegrationTests {
