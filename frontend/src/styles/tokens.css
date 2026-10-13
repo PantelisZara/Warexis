@@ -1,0 +1,17 @@
+:root {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --color-canvas: #f5f6f8;
+  --color-surface: #fff;
+  --color-subtle: #f8f9fb;
+  --color-text: #172234;
+  --color-muted: #59677b;
+  --color-border: #e0e4ea;
+  --color-selected: #f0f2f5;
+  --color-primary: #172234;
+  --color-brand: #c92732;
+  --color-link: #285399;
+  --color-focus: #3478ce;
+  --radius: 10px;
+  --radius-sm: 6px;
+}

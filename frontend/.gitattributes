@@ -1,0 +1,2 @@
+# Preserve official export bytes, including their original CRLF line endings.
+public/brand/*.svg -text whitespace=cr-at-eol
