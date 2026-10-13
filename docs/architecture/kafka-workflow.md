@@ -4,8 +4,11 @@ Kafka adapters are opt-in. All three services default to `WAREXIS_MESSAGING_ENAB
 Set `WAREXIS_MESSAGING_ENABLED=true` and `KAFKA_BOOTSTRAP_SERVERS` for each service
 process to enable its publisher and listener. Follow the
 [local infrastructure guide](../../infrastructure/local/README.md) to start the
-local PostgreSQL databases, Kafka broker, and host services. The unauthenticated
-APIs bind to loopback in those recipes.
+local PostgreSQL databases, Kafka broker, Keycloak and host services. The Bearer-authenticated
+APIs bind to loopback in those recipes. Supply the required issuer/audience settings
+and use an OPERATOR token for external commands or VIEWER/OPERATOR for reads; see
+the [security matrix](security.md) and [local identity guide](../../infrastructure/auth/README.md).
+User tokens never propagate through Kafka events.
 
 Enabled services provision the three-partition, single-replica development topics
 from [ADR 0004](adr/0004-message-topology-and-delivery-semantics.md) and the Fulfillment extension in [ADR 0005](adr/0005-fulfillment-and-manual-dispatch.md). These settings
@@ -179,7 +182,8 @@ then completes several later order IDs on the same partition. Restarting again
 with a new same-partition record proves completed DLT state does not resurrect.
 Broker-outage scenarios also retain unpublished event identity and an exhausted
 relay budget across Order or Fulfillment restart until explicit operator recovery.
-The 47-case packaged suite preserves the original 28 Order/Inventory cases and
+The 47 preserved workflow cases run alongside four real-Keycloak security cases
+(51 total). The workflow preserves the original 28 Order/Inventory cases and
 adds confirmation, manual dispatch, duplicate/alias/conflict handling, immutable
 shipment origin, reference ownership, pending confirmation/shipment outbox
 recovery, technical rollback, and Fulfillment restart/DLT/paused-partition checks.

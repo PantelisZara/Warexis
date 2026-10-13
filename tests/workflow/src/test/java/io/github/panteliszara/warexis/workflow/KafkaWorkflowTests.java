@@ -68,6 +68,7 @@ class KafkaWorkflowTests {
     private static final PostgreSQLContainer ORDER_DB = new PostgreSQLContainer("postgres:18.6");
     private static final PostgreSQLContainer INVENTORY_DB = new PostgreSQLContainer("postgres:18.6");
     private static final PostgreSQLContainer FULFILLMENT_DB = new PostgreSQLContainer("postgres:18.6");
+    private static final KeycloakFixture IDENTITY = new KeycloakFixture();
     private static Process fulfillmentProcess;
     private static int fulfillmentPort;
     private static Process orderProcess;
@@ -88,6 +89,7 @@ class KafkaWorkflowTests {
             var target = Path.of("target");
             Files.createDirectories(target);
             for (var service : List.of("order", "inventory", "fulfillment")) Files.writeString(target.resolve(service + ".log"), "");
+            IDENTITY.start();
             ORDER_DB.start();
             INVENTORY_DB.start();
             FULFILLMENT_DB.start();
@@ -133,12 +135,101 @@ class KafkaWorkflowTests {
         cleanup(INVENTORY_DB::stop, failures);
         cleanup(ORDER_DB::stop, failures);
         cleanup(FULFILLMENT_DB::stop, failures);
+        cleanup(IDENTITY::close, failures);
         if (!failures.isEmpty()) {
             var failure = new AssertionError("Owned workflow resources could not all be cleaned up");
             failures.forEach(failure::addSuppressed);
             throw failure;
         }
     }
+
+
+    @ParameterizedTest(name = "{0}: real Keycloak security matrix")
+    @MethodSource("allConsumerDirections") @Order(0)
+    void packagedSecurityMatrix(String service) throws Exception {
+        var sku = stock(10);
+        var order = createOrder(List.of(line(sku, 1)));
+        terminal(order, "CONFIRMED");
+        var fulfillment = fulfillment(order);
+        var fulfillmentId = fulfillment.path("id").asString();
+        int port = service.equals("order") ? orderPort : service.equals("inventory") ? inventoryPort : fulfillmentPort;
+        var reads = service.equals("order") ? List.of("/api/orders/" + order)
+                : service.equals("inventory") ? List.of("/api/stock-items/" + sku)
+                : List.of("/api/fulfillments/" + fulfillmentId, "/api/fulfillments/orders/" + order);
+        for (var path : reads) {
+            securityResponse(requestWithAuthorization(port, path, "GET", null, null), 401);
+            securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer malformed"), 401);
+            securityResponse(requestWithAuthorization(port, path, "GET", null, "Basic dXNlcjpwYXNz"), 401);
+            for (var client : List.of("wrong-audience", "missing-audience", "foreign"))
+                securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client)), 401);
+            for (var client : List.of("scope-only", "client-role-only", "lookalike"))
+                securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client)), 403);
+            for (var client : List.of("viewer", "operator")) {
+                var response = requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client));
+                assertThat(response.statusCode()).isEqualTo(200);
+                assertThat(response.headers().firstValue("Set-Cookie")).isEmpty();
+            }
+        }
+        var mutations = service.equals("order") ? List.of(new Mutation("/api/orders", "POST",
+                JSON.writeValueAsString(Map.of("lines", List.of(line(sku, 1)))), 201))
+                : service.equals("inventory") ? List.of(new Mutation("/api/stock-items", "POST",
+                JSON.writeValueAsString(Map.of("sku", "SEC-" + UUID.randomUUID(), "onHand", 2)), 201),
+                new Mutation("/api/stock-items/" + sku, "PUT", "{\"onHand\":20}", 200))
+                : List.of(new Mutation("/api/fulfillments/" + fulfillmentId + "/ship", "POST", "{\"shipmentReference\":\"SECURITY-SHIP\"}", 200));
+        for (var mutation : mutations) {
+            securityResponse(requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), null), 401);
+            securityResponse(requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), "Bearer " + IDENTITY.token("viewer")), 403);
+            var response = requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), "Bearer " + IDENTITY.token("operator"));
+            assertThat(response.statusCode()).isEqualTo(mutation.expected());
+            assertThat(response.headers().firstValue("Set-Cookie")).isEmpty();
+        }
+        assertThat(requestWithAuthorization(port, "/actuator/health", "GET", null, null).statusCode()).isEqualTo(200);
+        var health = JSON.readTree(requestWithAuthorization(port, "/actuator/health", "GET", null, null).body());
+        assertThat(health.path("status").asString()).isEqualTo("UP");
+        assertThat(health.has("components") || health.has("details")).as("anonymous health has no sensitive details").isFalse();
+        for (var path : List.of("/actuator/env", "/actuator", "/error", "/login", "/logout", "/api/unclassified"))
+            securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token("operator")), 403);
+        var duplicate = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + reads.get(0)))
+                .header("Authorization", "Bearer " + IDENTITY.token("operator"))
+                .header("Authorization", "Bearer " + IDENTITY.token("viewer")).GET().build();
+        securityResponse(HTTP.send(duplicate, HttpResponse.BodyHandlers.ofString()), 400);
+        // Real authenticated commands emit domain facts, never credentials or principal data.
+        for (var database : List.of(ORDER_DB, INVENTORY_DB, FULFILLMENT_DB)) {
+            try (var connection = DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword());
+                 var statement = connection.createStatement(); var result = statement.executeQuery("SELECT event_json::text FROM outbox_events")) {
+                while (result.next()) {
+                    var event = result.getString(1);
+                    assertThat(event.contains("access_token") || event.contains("Authorization") || event.contains("Bearer ")
+                            || event.contains(IDENTITY.token("operator"))).as("domain event contains no access credentials").isFalse();
+                }
+            }
+        }
+    }
+
+    @Test @Order(0) @Timeout(120)
+    void packagedServicesRejectActuallyExpiredKeycloakToken() throws Exception {
+        var token = IDENTITY.token("expired");
+        var expiry = java.time.Instant.ofEpochSecond(KeycloakFixture.claims(token).path("exp").asLong());
+        await(() -> java.time.Instant.now().isAfter(expiry.plusSeconds(61)), "real token expiration beyond default clock skew", Duration.ofSeconds(80));
+        for (var port : List.of(orderPort, inventoryPort, fulfillmentPort)) {
+            var path = port == orderPort ? "/api/orders/" + UUID.randomUUID()
+                    : port == inventoryPort ? "/api/stock-items/Unknown" : "/api/fulfillments/" + UUID.randomUUID();
+            securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + token), 401);
+        }
+    }
+
+    private static void securityResponse(HttpResponse<String> response, int status) {
+        assertThat(response.statusCode()).isEqualTo(status);
+        assertThat(response.headers().firstValue("Set-Cookie")).isEmpty();
+        assertThat(response.headers().firstValue("Content-Type").orElse("")).startsWith("application/problem+json");
+        assertThat(JSON.readTree(response.body()).path("status").asInt()).isEqualTo(status);
+        var challenge = response.headers().firstValue("WWW-Authenticate").orElse("");
+        assertThat(challenge).startsWith("Bearer");
+        if (status == 403) assertThat(challenge).contains("insufficient_scope");
+        if (status == 400) assertThat(challenge).contains("invalid_request");
+        assertThat(response.body().contains("eyJ") || response.body().contains("JwtValidationException")).isFalse();
+    }
+    private record Mutation(String path, String method, String body, int expected) { }
 
     @Test @Order(1)
     void confirmsOriginalRepeatedLinesWithOneDurableOutcome() throws Exception {
@@ -931,6 +1022,8 @@ class KafkaWorkflowTests {
         var builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "-Xmx384m", "-jar", requireJar(name).toString(),
                 "--warexis.messaging.enabled=true", "--spring.kafka.bootstrap-servers=" + KAFKA.getBootstrapServers(),
                 "--warexis.messaging.retry-base-delay=10ms", "--warexis.messaging.poll-interval=50ms", "--server.address=127.0.0.1", "--server.port=" + port);
+        builder.environment().put("WAREXIS_OAUTH2_ISSUER_URI", IDENTITY.issuer());
+        builder.environment().put("WAREXIS_OAUTH2_AUDIENCE", "warexis-api");
         builder.environment().put(name.toUpperCase() + "_DB_URL", database.getJdbcUrl());
         builder.environment().put(name.toUpperCase() + "_DB_USERNAME", database.getUsername());
         builder.environment().put(name.toUpperCase() + "_DB_PASSWORD", database.getPassword());
@@ -979,10 +1072,17 @@ class KafkaWorkflowTests {
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations WHERE order_id = ? AND status = '" + expected + "'", id)).isEqualTo(1);
     }
     private static HttpResponse<String> request(int port, String path, String method, String body) {
+        return requestWithAuthorization(port, path, method, body,
+                path.equals("/actuator/health") ? null : "Bearer " + IDENTITY.token("operator"));
+    }
+    private static HttpResponse<String> requestWithAuthorization(int port, String path, String method, String body, String authorization) {
         try {
-            return HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).timeout(Duration.ofSeconds(5)).header("Content-Type", "application/json")
-                    .method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
-        } catch (Exception failure) { throw new IllegalStateException("HTTP request failed", failure); }
+            var builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                    .timeout(Duration.ofSeconds(5)).header("Content-Type", "application/json");
+            if (authorization != null) builder.header("Authorization", authorization);
+            return HTTP.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        } catch (Exception failure) { throw new IllegalStateException("HTTP request failed"); }
     }
     private static long count(PostgreSQLContainer database, String sql, Object id) {
         try (var connection = DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword()); var query = connection.prepareStatement(sql)) {

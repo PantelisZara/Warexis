@@ -11,10 +11,12 @@ The only transition is `PENDING` to `SHIPPED`. This records a manual operator ha
 Use Java 21. Provide `FULFILLMENT_DB_URL`, `FULFILLMENT_DB_USERNAME` and `FULFILLMENT_DB_PASSWORD` for the owned PostgreSQL database before running:
 
 ```sh
+export WAREXIS_OAUTH2_ISSUER_URI=http://127.0.0.1:18080/realms/warexis
+export WAREXIS_OAUTH2_AUDIENCE=warexis-api
 ./mvnw spring-boot:run
 ```
 
-HTTP defaults to `127.0.0.1:8083`; `FULFILLMENT_HTTP_PORT` overrides the port. This phase exposes an unauthenticated local portfolio API; keep it on loopback. Only the health actuator endpoint is exposed, without details.
+HTTP defaults to `127.0.0.1:8083`; `FULFILLMENT_HTTP_PORT` overrides the port. This is a secured local portfolio API; keep it on loopback. Only the health actuator endpoint is exposed, without details.
 
 Messaging is disabled by default. Set `WAREXIS_MESSAGING_ENABLED=true` and `KAFKA_BOOTSTRAP_SERVERS` explicitly to enable the consumer and outbox relay. Inventory must support the additive `OrderConfirmed` type before Order publication is enabled. Topics have three partitions with stable order UUID keys:
 
@@ -24,6 +26,15 @@ Messaging is disabled by default. Set `WAREXIS_MESSAGING_ENABLED=true` and `KAFK
 | Independent Fulfillment group | `warexis.fulfillment.order-events.v1` |
 | Fulfillment consumer DLT | `warexis.order.events.v1.fulfillment.dlt` |
 | Fulfillment output | `warexis.fulfillment.events.v1` |
+
+## HTTP security
+
+Business requests require a valid Bearer access token. Read endpoints permit
+`WAREXIS_VIEWER` or `WAREXIS_OPERATOR`; mutations require `WAREXIS_OPERATOR`.
+Missing/invalid authentication returns 401; insufficient roles return 403.
+Only `GET /actuator/health` is anonymous, without components or sensitive details.
+See the [complete authorization matrix](../../docs/architecture/security.md) and
+[local Keycloak/token guide](../../infrastructure/auth/README.md).
 
 ## Owned HTTP API
 
