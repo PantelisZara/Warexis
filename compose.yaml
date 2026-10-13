@@ -61,6 +61,54 @@ services:
       retries: 5
       start_period: 20s
 
+  keycloak-postgres:
+    image: postgres:18.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${KEYCLOAK_POSTGRES_DB:-warexis_identity}
+      POSTGRES_USER: ${KEYCLOAK_POSTGRES_USER:-warexis_identity}
+      POSTGRES_PASSWORD: ${KEYCLOAK_POSTGRES_PASSWORD:?Set KEYCLOAK_POSTGRES_PASSWORD for local development}
+    volumes:
+      - keycloak-postgres-data:/var/lib/postgresql
+    networks:
+      - local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/${KEYCLOAK_POSTGRES_DB:-warexis_identity}
+      KC_DB_USERNAME: ${KEYCLOAK_POSTGRES_USER:-warexis_identity}
+      KC_DB_PASSWORD: ${KEYCLOAK_POSTGRES_PASSWORD:?Set KEYCLOAK_POSTGRES_PASSWORD for local development}
+      KC_HOSTNAME: http://127.0.0.1:${KEYCLOAK_HTTP_PORT:-18080}
+      KC_BOOTSTRAP_ADMIN_CLIENT_ID: ${KEYCLOAK_BOOTSTRAP_ADMIN_CLIENT_ID:-warexis-bootstrap-admin}
+      KC_BOOTSTRAP_ADMIN_CLIENT_SECRET: ${KEYCLOAK_BOOTSTRAP_ADMIN_CLIENT_SECRET:?Set a random local bootstrap service-account secret}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_HTTP_PORT:-18080}:8080"
+    volumes:
+      - ./infrastructure/auth/warexis-realm.json:/opt/keycloak/data/import/warexis-realm.json:ro
+    depends_on:
+      keycloak-postgres:
+        condition: service_healthy
+    networks:
+      - local
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep -q 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
   kafka:
     image: apache/kafka:4.2.2
     restart: unless-stopped
@@ -107,3 +155,4 @@ volumes:
   inventory-postgres-data:
   fulfillment-postgres-data:
   kafka-data:
+  keycloak-postgres-data:
