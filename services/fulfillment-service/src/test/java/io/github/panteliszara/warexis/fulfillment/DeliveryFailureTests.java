@@ -29,7 +29,8 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 import static org.mockito.ArgumentMatchers.any;
 
-@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties={"WAREXIS_OAUTH2_ISSUER_URI=https://issuer.example.test/realms/warexis", "WAREXIS_OAUTH2_AUDIENCE=warexis-api"})
 @Import({FulfillmentServiceTests.PostgresConfiguration.class,DeliveryFailureTests.StateConfiguration.class})
 class DeliveryFailureTests {
     @Autowired DeliveryState deliveries;

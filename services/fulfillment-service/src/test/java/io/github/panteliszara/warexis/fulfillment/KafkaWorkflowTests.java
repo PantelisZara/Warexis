@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties={"warexis.messaging.enabled=true","warexis.messaging.retry-base-delay=10ms","warexis.messaging.poll-interval=50ms"})
+        properties={"WAREXIS_OAUTH2_ISSUER_URI=https://issuer.example.test/realms/warexis", "WAREXIS_OAUTH2_AUDIENCE=warexis-api", "warexis.messaging.enabled=true","warexis.messaging.retry-base-delay=10ms","warexis.messaging.poll-interval=50ms"})
 @Import(FulfillmentServiceTests.PostgresConfiguration.class)
 class KafkaWorkflowTests {
     @Container static KafkaContainer broker=new KafkaContainer("apache/kafka:4.2.2");

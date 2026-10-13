@@ -18,7 +18,8 @@ import tools.jackson.databind.json.JsonMapper;
 import io.github.panteliszara.warexis.fulfillment.application.*;
 import io.github.panteliszara.warexis.fulfillment.messaging.*;
 import static org.assertj.core.api.Assertions.*;
-@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties={"WAREXIS_OAUTH2_ISSUER_URI=https://issuer.example.test/realms/warexis", "WAREXIS_OAUTH2_AUDIENCE=warexis-api"})
 @Import(FulfillmentServiceTests.PostgresConfiguration.class)
 class FulfillmentServiceTests {
     @Autowired FulfillmentService service;
@@ -209,12 +210,12 @@ class FulfillmentServiceTests {
         }
     }
     private HttpResponse<String> get(String path) throws Exception {
-        try(var client=HttpClient.newHttpClient()) { return client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).timeout(Duration.ofSeconds(10)).GET().build(),HttpResponse.BodyHandlers.ofString()); }
+        try(var client=HttpClient.newHttpClient()) { return client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+path)).timeout(Duration.ofSeconds(10)).header("Authorization","Bearer "+TestJwtConfiguration.operator()).GET().build(),HttpResponse.BodyHandlers.ofString()); }
     }
     private HttpResponse<String> post(UUID id,String body) throws Exception {
-        try(var client=HttpClient.newHttpClient()) { return client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/fulfillments/"+id+"/ship")).timeout(Duration.ofSeconds(10)).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString()); }
+        try(var client=HttpClient.newHttpClient()) { return client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+port+"/api/fulfillments/"+id+"/ship")).timeout(Duration.ofSeconds(10)).header("Content-Type","application/json").header("Authorization","Bearer "+TestJwtConfiguration.operator()).POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString()); }
     }
-    @TestConfiguration(proxyBeanMethods=false) static class PostgresConfiguration {
+    @TestConfiguration(proxyBeanMethods=false) @Import(TestJwtConfiguration.class) static class PostgresConfiguration {
         @Bean @ServiceConnection PostgreSQLContainer postgres() { return new PostgreSQLContainer("postgres:18.6"); }
     }
 }
