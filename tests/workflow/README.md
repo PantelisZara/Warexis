@@ -1,8 +1,10 @@
 # Kafka workflow verification
 
 This test-only Maven module runs all three packaged service JARs as separate Java 21
-processes, one disposable Apache Kafka 4.2.2 broker, and three independent disposable
-PostgreSQL 18.6 databases. HTTP requests drive the workflow; Kafka clients observe
+processes, one disposable Apache Kafka 4.2.2 broker, three independent disposable
+business PostgreSQL 18.6 databases, and actual Keycloak 26.8.0 with a separate
+identity PostgreSQL database. Real Keycloak OPERATOR tokens authenticate external
+HTTP workflow commands; Kafka events contain no access credentials. HTTP requests drive the workflow; Kafka clients observe
 DLTs and replay events; SQL observes durable invariants and performs explicit
 recovery only inside the test database. It does not use the local Compose stack.
 
@@ -24,10 +26,11 @@ services/order-service/mvnw --batch-mode --no-transfer-progress \
   -f tests/workflow/pom.xml \
   -Dorder.jar=/path/to/order-service.jar \
   -Dinventory.jar=/path/to/inventory-service.jar \
-  -Dfulfillment.jar=/path/to/fulfillment-service.jar verify
+  -Dfulfillment.jar=/path/to/fulfillment-service.jar \
+  -Dkeycloak.realm=/path/to/infrastructure/auth/warexis-realm.json verify
 ```
 
-Default paths point to each service's `target` JAR in this checkout. Diagnostics
+Default paths point to each service's `target` JAR and `infrastructure/auth/warexis-realm.json` in this checkout. Diagnostics
 are kept under `tests/workflow/target/order.log` and `inventory.log` and `fulfillment.log`; Maven reports
 are under `tests/workflow/target/surefire-reports`.
 
@@ -74,8 +77,39 @@ not silently skip real-broker checks.
 
 ## Phase 6 workflow extensions
 
-The suite runs 47 packaged-service cases. Its new cases cover full original confirmation snapshots, independent groups and validated unsubscribed events, concurrent identical manual dispatch, immutable shipment origin, duplicate confirmation and same-order aliases after dispatch/restart, conflicting confirmation and wrong-stream Inventory trigger DLT, seven malformed-confirmation vectors, pending OrderConfirmed and FulfillmentShipped outbox JVM recovery, global reference ownership, Fulfillment broker exhaustion/explicit recovery, four-attempt technical rollback/DLT/recovery, and atomic ship/outbox rollback. It also applies the existing post-business-commit checkpoint failure, database outage, and paused-partition/DLT restart matrix to Fulfillment.
+The suite preserves 47 packaged workflow cases and adds four real-token security cases (51 total). Its new cases cover full original confirmation snapshots, independent groups and validated unsubscribed events, concurrent identical manual dispatch, immutable shipment origin, duplicate confirmation and same-order aliases after dispatch/restart, conflicting confirmation and wrong-stream Inventory trigger DLT, seven malformed-confirmation vectors, pending OrderConfirmed and FulfillmentShipped outbox JVM recovery, global reference ownership, Fulfillment broker exhaustion/explicit recovery, four-attempt technical rollback/DLT/recovery, and atomic ship/outbox rollback. It also applies the existing post-business-commit checkpoint failure, database outage, and paused-partition/DLT restart matrix to Fulfillment.
 
 A successful order now owns one OrderPlaced and one OrderConfirmed outbox fact; rejection owns only OrderPlaced. Existing fault injections and stored-envelope assertions target the intended event type instead of relying on a single arbitrary row. Original stock, decision, no-mutation, retry-budget, source-offset and recovery assertions remain in place. New poison checks also compare Fulfillment plans, processed confirmations and shipment events after independently waiting for the prior consumer workload to complete.
 
 Run individual full service test/verify lifecycles first and supply their rebuilt current binaries when using separate worktrees. Local verification of the three-service workflow does not imply hosted CI execution; hosted results require an actual hosted run.
+
+## Real Keycloak security gate
+
+`scripts/verify-security.sh` builds current executable JARs and runs only the four
+packaged security cases. `scripts/verify-workflow.sh` runs all 51 cases. Neither
+subset success nor old binary evidence establishes full workflow success.
+
+The fixture imports the exact repository realm, checks OIDC discovery and JWKS,
+and provisions temporary scoped service-account clients through a temporary
+bootstrap administrative service account. It uses `client_credentials`, disables
+password/browser grants, generates secrets at runtime, and removes bootstrap
+after provisioning. Tokens and secrets stay in memory. OPERATOR tokens refresh
+before expiry throughout the lengthy restart/recovery run.
+
+Each packaged service rejects missing/malformed credentials, missing or explicitly
+wrong audiences, and a separately issued token with the intended API audience.
+Real VIEWER reads succeed and commands return 403; OPERATOR reads/commands succeed.
+Actual OAuth scopes, client-role arrays and lookalike realm-role arrays cannot
+grant Warexis roles. Health remains anonymous without component/details data,
+other Actuator/undefined routes are denied, duplicate Authorization headers return
+standard 400, and responses do not set authentication cookies. One short-lived
+real token is retained beyond expiration plus the framework clock-skew allowance;
+all three services reject it. Stored outgoing domain events are inspected for
+access credentials. The unchanged workflow cases then prove the authenticated
+command → Kafka → Inventory → Kafka → Order → Kafka → Fulfillment chain with the
+existing idempotency, DLT, offset, bounded retry and restart invariants.
+
+The verifier owns and cleans up its separate identity/business resources. It does
+not use/reset the persistent local Compose identity or business data. Hosted CI
+defines three service verification jobs and this complete packaged gate with a
+45-minute timeout; no remote identity credentials or secrets are required.

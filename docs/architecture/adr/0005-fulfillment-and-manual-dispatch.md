@@ -20,4 +20,4 @@ Order remains CONFIRMED after dispatch. A future Order.SHIPPED feature would req
 
 ## Consequences
 
-Each service can recover independently. The new local API binds loopback and remains unauthenticated portfolio scope. Separate public deployment/authentication, stock consumption, carrier integration and delivery lifecycle decisions are required before expanding this boundary.
+Each service can recover independently. The local API binds loopback. Its original unauthenticated boundary has since been replaced by the [stateless JWT authorization model](../security.md); manual dispatch now requires WAREXIS_OPERATOR. Production deployment/identity, stock consumption, carrier integration and delivery lifecycle decisions are required before expanding this boundary.

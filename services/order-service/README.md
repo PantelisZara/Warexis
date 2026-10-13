@@ -17,6 +17,8 @@ export ORDER_DB_URL=jdbc:postgresql://127.0.0.1:15432/warexis_order
 export ORDER_DB_USERNAME=warexis_order
 export SERVER_ADDRESS=127.0.0.1
 export SERVER_PORT=8081
+export WAREXIS_OAUTH2_ISSUER_URI=http://127.0.0.1:18080/realms/warexis
+export WAREXIS_OAUTH2_AUDIENCE=warexis-api
 read -rsp 'Order database password: ' ORDER_DB_PASSWORD
 echo
 export ORDER_DB_PASSWORD
@@ -27,12 +29,27 @@ Run commands from `services/order-service`. The password must match the configur
 `ORDER_POSTGRES_PASSWORD`; Compose's `--env-file` does not export variables to a
 separately launched Java process. Application port remains runtime-configurable.
 
+## HTTP security
+
+Business requests require a valid Bearer access token. Read endpoints permit
+`WAREXIS_VIEWER` or `WAREXIS_OPERATOR`; mutations require `WAREXIS_OPERATOR`.
+Missing/invalid authentication returns 401; insufficient roles return 403.
+Only `GET /actuator/health` is anonymous, without components or sensitive details.
+See the [complete authorization matrix](../../docs/architecture/security.md) and
+[local Keycloak/token guide](../../infrastructure/auth/README.md).
+
+The curl examples assume an authorized short-lived token already supplied by a
+trusted local OIDC client in `WAREXIS_ACCESS_TOKEN`. Keep it in shell memory;
+do not save it in `.env`, commit it or log it. The safe Python example in the
+identity guide keeps its token in memory and does not export this shell variable.
+
 ## API
 
 Create an order:
 
 ```sh
 curl -i http://localhost:8081/api/orders \
+  -H "Authorization: Bearer ${WAREXIS_ACCESS_TOKEN:?Provide an authorized local token}" \
   -H 'Content-Type: application/json' \
   -d '{"lines":[{"sku":"SKU-1","quantity":2},{"sku":"SKU-1","quantity":3}]}'
 ```
@@ -56,7 +73,8 @@ IDs and timestamps in this example are illustrative; use the returned ID to read
 the persisted order:
 
 ```sh
-curl -i http://localhost:8081/api/orders/REPLACE_WITH_RETURNED_UUID
+curl -i -H "Authorization: Bearer ${WAREXIS_ACCESS_TOKEN:?Provide an authorized local token}" \
+  http://localhost:8081/api/orders/REPLACE_WITH_RETURNED_UUID
 curl -i http://localhost:8081/actuator/health
 ```
 
@@ -70,11 +88,12 @@ matching `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` with no trimming or normalization.
 Repeated SKUs remain separate lines. Quantities must be positive JSON integers
 between 1 and 2147483647; fractional numbers and numeric strings are rejected.
 Invalid input or malformed JSON returns `400` with safe `application/problem+json`
-details and creates no partial order. Unsupported HTTP methods return `405` and
-unsupported request media types return `415`.
+details and creates no partial order. Unclassified methods/routes are denied
+(403 to authenticated callers, 401 without valid authentication). Unsupported
+request media types on authorized matched endpoints return `415`.
 
-The API is intended for local development at this stage. Authentication and
-authorization are not implemented. With messaging enabled, validated Inventory
+The secured API is intended for local development at this stage. With messaging
+enabled, validated Inventory
 outcomes transition `PENDING_INVENTORY` to `CONFIRMED` or `REJECTED`. No inventory database is
 accessed. Minimum line count is enforced by the aggregate/application boundary;
 PostgreSQL independently enforces line values, positions, uniqueness and foreign

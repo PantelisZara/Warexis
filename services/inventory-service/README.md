@@ -3,7 +3,7 @@
 Java 21 / Spring Boot stock API backed by its own PostgreSQL database. Flyway V1 owns `stock_items`; V2 owns reservation decisions, processed-event
 identities, and outgoing events; Hibernate validates the schema and never generates it.
 
-This is an unauthenticated local-development API. Authentication is outside this implementation. Kafka adapters are opt-in. Reservations
+This is a Bearer-authenticated local-development API. Kafka adapters are opt-in. Reservations
 are an internal application use case; no reservation HTTP endpoint is exposed.
 
 ## Run locally
@@ -11,8 +11,24 @@ are an internal application use case; no reservation HTTP endpoint is exposed.
 Follow the repository's [local infrastructure and host-service recipes](../../infrastructure/local/README.md).
 Inventory uses HTTP port 8082 in those recipes. The application requires
 `INVENTORY_DB_URL`, `INVENTORY_DB_USERNAME`, and `INVENTORY_DB_PASSWORD`;
-Compose does not export them to the host Java process. Use only local example
+It also requires `WAREXIS_OAUTH2_ISSUER_URI` and `WAREXIS_OAUTH2_AUDIENCE`; use
+`http://127.0.0.1:18080/realms/warexis` and `warexis-api` for the local identity.
+Compose does not export these variables to the host Java process. Use only local example
 values for development, never real credentials in committed files.
+
+## HTTP security
+
+Business requests require a valid Bearer access token. Read endpoints permit
+`WAREXIS_VIEWER` or `WAREXIS_OPERATOR`; mutations require `WAREXIS_OPERATOR`.
+Missing/invalid authentication returns 401; insufficient roles return 403.
+Only `GET /actuator/health` is anonymous, without components or sensitive details.
+See the [complete authorization matrix](../../docs/architecture/security.md) and
+[local Keycloak/token guide](../../infrastructure/auth/README.md).
+
+The curl examples assume an authorized short-lived token already supplied by a
+trusted local OIDC client in `WAREXIS_ACCESS_TOKEN`. Keep it in shell memory;
+do not save it in `.env`, commit it or log it. The safe Python example in the
+identity guide keeps its token in memory and does not export this shell variable.
 
 ## Stock API
 
@@ -42,10 +58,10 @@ leaves existing quantities unchanged.
 With the local service running:
 
 ```sh
-curl -i -H 'Content-Type: application/json' \
+curl -i -H "Authorization: Bearer ${WAREXIS_ACCESS_TOKEN:?Provide an authorized local token}" -H 'Content-Type: application/json' \
   -d '{"sku":"SKU-001","onHand":12}' http://127.0.0.1:8082/api/stock-items
-curl -i http://127.0.0.1:8082/api/stock-items/SKU-001
-curl -i -X PUT -H 'Content-Type: application/json' \
+curl -i -H "Authorization: Bearer ${WAREXIS_ACCESS_TOKEN:?Provide an authorized local token}" http://127.0.0.1:8082/api/stock-items/SKU-001
+curl -i -X PUT -H "Authorization: Bearer ${WAREXIS_ACCESS_TOKEN:?Provide an authorized local token}" -H 'Content-Type: application/json' \
   -d '{"onHand":8}' http://127.0.0.1:8082/api/stock-items/SKU-001
 ```
 
