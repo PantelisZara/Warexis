@@ -27,7 +27,7 @@ export default function DashboardPage({ health, onRefresh }: { health?: ServiceH
         <div className="panel-heading"><div><h2 id="health-heading">Service availability</h2><p>Availability reports connectivity, not order or reservation progress.</p></div>{onRefresh && <button className="button button--secondary" type="button" onClick={onRefresh}>Refresh health</button>}</div>
         {health ? <ul className="service-list">{health.map(({ service, status }) => <li key={service}><span>{service}</span><StatusBadge tone={status === 'up' ? 'success' : status === 'unavailable' ? 'danger' : 'neutral'}>{status === 'up' ? 'Available' : status === 'unavailable' ? 'Unavailable' : status === 'checking' ? 'Checking…' : 'Not checked'}</StatusBadge></li>)}</ul> : <p className="empty-state">Service health has not been checked.</p>}
       </section>
-      <p className="scope-note">Use an order ID, fulfillment ID, or SKU to look up a record. Collection views and analytics are not available in this phase.</p>
+      <p className="scope-note">Look up records by order ID, fulfillment ID, or SKU.</p>
     </>
   )
 }

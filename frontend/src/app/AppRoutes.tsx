@@ -1,24 +1,25 @@
 import { Link, Route, Routes } from 'react-router'
+import { useAuth } from '../auth/useAuth'
 import { AppShell } from './AppShell'
-import DashboardPage from '../features/dashboard/DashboardPage'
+import { SessionControls } from './SessionControls'
+import { ReadAccess } from './ReadAccess'
+import { Overview } from './Overview'
+import OrdersPage from '../features/orders/OrdersPage'
+import InventoryPage from '../features/inventory/InventoryPage'
+import FulfillmentPage from '../features/fulfillment/FulfillmentPage'
 
-function PendingPage({ name }: { name: string }) {
-  return <section className="panel"><h1>{name}</h1><p>This screen is awaiting its Phase 8 feature integration.</p><Link to="/">Return to overview</Link></section>
-}
 function NotFoundPage() {
   return <section className="panel"><p className="eyebrow">Page not found</p><h1>That workspace page does not exist.</h1><Link to="/">Return to overview</Link></section>
 }
-
 export function AppRoutes() {
-  return (
-    <Routes>
-      <Route element={<AppShell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="orders" element={<PendingPage name="Orders" />} />
-        <Route path="inventory" element={<PendingPage name="Inventory" />} />
-        <Route path="fulfillment" element={<PendingPage name="Fulfillment" />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Route>
-    </Routes>
-  )
+  const auth = useAuth()
+  return <Routes>
+    <Route element={<AppShell session={<SessionControls />} />}>
+      <Route index element={<Overview />} />
+      <Route path="orders" element={<ReadAccess><OrdersPage key={auth.sessionEpoch} canOperate={auth.canOperate} /></ReadAccess>} />
+      <Route path="inventory" element={<ReadAccess><InventoryPage key={auth.sessionEpoch} canOperate={auth.canOperate} /></ReadAccess>} />
+      <Route path="fulfillment" element={<ReadAccess><FulfillmentPage key={auth.sessionEpoch} canOperate={auth.canOperate} /></ReadAccess>} />
+      <Route path="*" element={<NotFoundPage />} />
+    </Route>
+  </Routes>
 }
