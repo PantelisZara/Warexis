@@ -24,6 +24,26 @@ describe('authenticated API client', () => {
     expired.mockClear(); fetcher.mockResolvedValue(new Response('', { status: 403 }));
     await expect(api.getStock('SKU-1')).rejects.toMatchObject({ status: 403 }); expect(expired).not.toHaveBeenCalled();
   });
+  it('passes the exact requesting credential to 401 handling, including its session epoch', async () => {
+    const credential = { token: 'unit-token-old', sessionEpoch: 2 }; const unauthorized = vi.fn();
+    configureAuthentication(() => Promise.resolve(credential), unauthorized);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })));
+    await expect(api.getStock('SKU-1')).rejects.toMatchObject({ status: 401 });
+    expect(unauthorized).toHaveBeenCalledExactlyOnceWith(credential);
+  });
+  it('checks cancellation before invalidating a late unauthorized response', async () => {
+    const controller = new AbortController(); const unauthorized = vi.fn();
+    configureAuthentication(() => Promise.resolve('unit-test-token'), unauthorized);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => { controller.abort(); return new Response('', { status: 401 }); }));
+    await expect(api.getStock('SKU-1', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+  it('does not expire authentication when an anonymous health request returns 401', async () => {
+    const unauthorized = vi.fn(); const token = vi.fn(); configureAuthentication(token, unauthorized);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })));
+    await expect(api.health('order')).rejects.toMatchObject({ status: 401 });
+    expect(token).not.toHaveBeenCalled(); expect(unauthorized).not.toHaveBeenCalled();
+  });
   it('parses business Problem Details and does not retry an uncertain mutation', async () => {
     configureAuthentication(() => Promise.resolve('unit-test-token'), vi.fn());
     const fetcher = vi.fn().mockResolvedValue(Response.json({ detail: 'On-hand quantity cannot be less than reserved stock.' }, { status: 409 })); vi.stubGlobal('fetch', fetcher);
@@ -45,6 +65,14 @@ describe('authenticated API client', () => {
       controller.abort(); return Promise.reject(new DOMException('Cancelled', 'AbortError'));
     } }));
     await expect(api.getOrder(id, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+  it('honors cancellation even if a response body resolves after abort instead of rejecting', async () => {
+    const controller = new AbortController(); configureAuthentication(() => Promise.resolve('unit-test-token'), vi.fn());
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => { controller.abort(); return stock; } }));
+    await expect(api.getStock('SKU-1', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    const next = new AbortController();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => { next.abort(); return { detail: 'Conflict' }; } }));
+    await expect(api.updateStock('SKU-1', 10, next.signal)).rejects.toMatchObject({ name: 'AbortError' });
   });
   it('preserves cancellation while reading an error response body', async () => {
     const controller = new AbortController(); configureAuthentication(() => Promise.resolve('unit-test-token'), vi.fn());

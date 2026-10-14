@@ -5,9 +5,10 @@ export class ApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) { super(message); this.name = 'ApiError'; this.status = status; }
 }
-let getToken: () => Promise<string> = () => Promise.reject(new ApiError(401, 'Please sign in to continue.'));
-let onUnauthorized: () => void = () => {};
-export function configureAuthentication(tokenProvider: () => Promise<string>, unauthorized: () => void): void {
+export interface AuthenticationCredential { token: string; sessionEpoch?: number }
+let getToken: () => Promise<string | AuthenticationCredential> = () => Promise.reject(new ApiError(401, 'Please sign in to continue.'));
+let onUnauthorized: (credential: AuthenticationCredential) => void = () => {};
+export function configureAuthentication(tokenProvider: () => Promise<string | AuthenticationCredential>, unauthorized: (credential: AuthenticationCredential) => void): void {
   getToken = tokenProvider; onUnauthorized = unauthorized;
 }
 function aborted(signal?: AbortSignal): void { signal?.throwIfAborted(); }
@@ -15,9 +16,12 @@ async function request<T>(service: Service, path: string, decode: (value: unknow
   method = 'GET', body?: unknown, signal?: AbortSignal, authenticated = true): Promise<T> {
   aborted(signal);
   const headers = new Headers({ Accept: 'application/json' });
+  let credential: AuthenticationCredential | undefined;
   if (authenticated) {
-    const token = await getToken(); aborted(signal);
-    if (!token) { onUnauthorized(); throw new ApiError(401, 'Your session has expired. Please sign in again.'); }
+    const provided = await getToken(); aborted(signal);
+    credential = typeof provided === 'string' ? { token: provided } : provided;
+    const { token } = credential;
+    if (!token) { onUnauthorized(credential); throw new ApiError(401, 'Your session has expired. Please sign in again.'); }
     headers.set('Authorization', `Bearer ${token}`);
   }
   if (body !== undefined) headers.set('Content-Type', 'application/json');
@@ -30,8 +34,9 @@ async function request<T>(service: Service, path: string, decode: (value: unknow
     throw new ApiError(0, method === 'GET' ? 'Could not reach the service. Check your connection and try again.' :
       'The request could not be confirmed. Its outcome may be unknown; check the resource before retrying.');
   }
+  aborted(signal);
   if (!response.ok) {
-    if (response.status === 401) onUnauthorized();
+    if (response.status === 401 && credential) onUnauthorized(credential);
     let detail = response.status === 401 ? 'Your session has expired. Please sign in again.' :
       response.status === 403 ? 'You do not have permission to perform this action.' :
       response.status === 404 ? 'The requested resource was not found.' :
@@ -41,6 +46,7 @@ async function request<T>(service: Service, path: string, decode: (value: unknow
     if (response.status !== 401 && response.status !== 403) {
       try {
         const problem: unknown = await response.json();
+        aborted(signal);
         if (problem && typeof problem === 'object' && 'detail' in problem && typeof problem.detail === 'string' && problem.detail.trim())
           detail = problem.detail.slice(0, 500);
       } catch (error) {
@@ -50,7 +56,11 @@ async function request<T>(service: Service, path: string, decode: (value: unknow
     }
     throw new ApiError(response.status, detail);
   }
-  try { return decode(await response.json() as unknown); }
+  try {
+    const value: unknown = await response.json();
+    aborted(signal);
+    return decode(value);
+  }
   catch (error) {
     if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error;
     throw new ApiError(502, method === 'GET' ? 'The service returned an unexpected response. Please refresh and try again.' :
