@@ -31,7 +31,7 @@ Stop from another terminal by creating the exact `stopFile` recorded in private 
 
 ## Required real-browser flow
 
-Use the official in-app Browser plugin. CLI/headless Playwright execution is not authorized by this fixture. Browser QA remains a separate gate and must not be claimed passed from fixture unit tests or health checks.
+Use the official in-app Browser plugin for exploratory QA. Separately, the explicitly authorized opt-in [frontend Playwright suite](../../frontend/README.md#automated-real-stack-regression) can verify the same running disposable stack. The fixture itself launches no browser; automated regression and official Browser exploratory QA remain separate gates and must not be claimed passed from fixture unit tests or health checks.
 
 1. Open the SPA anonymously; verify navigation, public health, explicit login and no business data disclosed.
 2. Log in as the ephemeral Operator through the real Keycloak page. Verify the redirect/code exchange and PKCE, with tokens only in application memory.

@@ -21,7 +21,7 @@ Authentication uses the official `keycloak-js` adapter, initialized before the r
 
 Mutations have synchronous duplicate guards and no automatic retries. An uncertain order creation requires deliberate acknowledgement and a blank new form before another creation. Stock/dispatch uncertainty requires same-resource reconciliation. Errors use the actual API messages and status; asynchronous business decisions are read from the backend, not inferred by the UI.
 
-Unit/component tests mock the adapter or API where appropriate. They establish available source-level behavior, not real login redirect or backend browser integration evidence. The mandatory real-browser gate remains unverified while the selected Browser plugin lacks its required bootstrap. Desktop/mobile rendering, real PKCE login/logout/refresh and the complete browser business workflow must still be executed before declaring the phase complete.
+Unit/component tests mock the adapter or API where appropriate. They establish available source-level behavior, not real login redirect or backend browser integration evidence. Official in-app Browser exploratory verification and the automated real-stack Playwright suite are separate gates. Desktop/mobile rendering, real PKCE login/logout/refresh and the complete browser business workflow require recorded live results before declaring the phase complete.
 
 ## Shared presentation contracts
 
@@ -37,4 +37,19 @@ Unit/component tests mock the adapter or API where appropriate. They establish a
 
 `public/brand/` contains byte-for-byte copies of the selected official exports: dark wordmark, red X icon, SVG / PNG favicon, and Apple touch icon. Originals remain user-owned outside the tracked frontend. The local Git attributes preserve the original CRLF export bytes and treat the carriage return as a line ending for whitespace checks. No master artwork, editable source, unrelated exports, or generated replacement logos are included. The dark wordmark is displayed on light surfaces; its aspect ratio is preserved. Font styling uses system fallbacks and no external font request.
 
-Unit tests use jsdom and Testing Library. They verify accessible navigation, unknown-route recovery, honest availability presentation, and shared field / error semantics. They do not substitute for the required real-browser authentication and business workflow gate. Browser automation is not executed by these scripts.
+Unit tests use jsdom and Testing Library. They verify accessible navigation, unknown-route recovery, honest availability presentation, and shared field / error semantics. They do not substitute for the required real-browser authentication and business workflow gate. The unit-test command does not execute browser automation.
+
+## Automated real-stack regression
+
+The opt-in Playwright suite uses the already-running [disposable fixture](../tests/browser-fixture/README.md) and Vite at exactly `http://127.0.0.1:5173`. It never starts or stops infrastructure. Start Vite with the fixture-provided public frontend environment first; keep the runtime JSON private and outside Git.
+
+```sh
+npm run typecheck:e2e
+WAREXIS_E2E_RUNTIME_FILE=/absolute/private/session/runtime.json npm run test:e2e
+```
+
+Use an installed compatible Chromium browser. When using a system browser instead of Playwright's existing browser cache, set `WAREXIS_E2E_BROWSER_EXECUTABLE` to its absolute executable path. The configuration enables the Chromium sandbox and adds no security-disabling flags. No browser download or installation is performed by the test commands.
+
+Tests use ephemeral Operator/Viewer identities through the real Keycloak login form and assert Authorization Code + PKCE S256. Business setup and state assertions use the actual UI, APIs, PostgreSQL and Kafka. Unique SKUs isolate each run; the entire fixture owns cleanup. One worker, no retries and bounded eventual UI assertions avoid replaying mutations. The suite verifies stock changes, confirmation/reservation, fulfillment dispatch/reload, Viewer reads and real server `403`, anonymous `401`, invalid/missing inputs, conflicts, rejection and offline read recovery. One fault-injection case forwards a genuine order POST to the real backend, verifies its `201` response, then drops only its response to verify duplicate guards and uncertain-outcome acknowledgement. It does not synthesize a successful business response.
+
+Credentials are read only from a mode `0600` runtime file in a mode `0700` directory outside Git. Traces, screenshots, video, failure-time ARIA snapshots and storage-state exports are disabled; do not enable them or run with protocol/API debug logging against credentialed sessions. Token inspection reports only a boolean, and no token is attached to test output. A bounded lifecycle case derives the actual bearer expiry in Node memory, waits for the real renewal window, observes a successful refresh grant, and revokes shared SSO using ordinary sign-out in a second page. The first page must then fail real refresh, clear business access and recover through normal login. With the fixture's five-minute token lifetime this case takes about nine minutes and has a twelve-minute limit; no realm settings, clocks or token responses are fabricated. Responsive rendering and keyboard inspection remain separate practical exploratory checks.
