@@ -2,6 +2,7 @@ import Keycloak from 'keycloak-js';
 import { ApiError, configureAuthentication } from '../shared/api/client';
 import type { AuthenticationCredential } from '../shared/api/client';
 import type { AuthSnapshot } from './contracts';
+import { clearReturnRoute, finishReturnRoute, prepareReturnRoute, rememberReturnRoute } from './routeRecovery';
 
 const rootRedirect = 'http://127.0.0.1:5173/';
 const listeners = new Set<() => void>();
@@ -33,6 +34,7 @@ function empty(status: AuthSnapshot['status'], error: string | null = null, canR
   publish({ status, error, canRetryLogout, canRead: false, canOperate: false, role: 'none', principalId: null, username: null });
 }
 function clearCredentials(): void {
+  clearReturnRoute();
   // Disable callbacks before clearToken, which invokes onAuthLogout synchronously.
   acceptsCredentials = false;
   adapter?.clearToken();
@@ -85,6 +87,7 @@ export function initializeAuth(): Promise<void> {
 }
 async function initialize(): Promise<void> {
   configureAuthentication(tokenForRequest, unauthorized);
+  const callback = prepareReturnRoute();
   try {
     const url = import.meta.env.VITE_KEYCLOAK_URL;
     const realm = import.meta.env.VITE_KEYCLOAK_REALM;
@@ -100,6 +103,7 @@ async function initialize(): Promise<void> {
       if (!loggingOut) empty('error', 'Sign-in failed. Please try signing in again.');
     };
     adapter.onAuthLogout = () => {
+      clearReturnRoute();
       if (acceptsCredentials && !loggingOut) { acceptsCredentials = false; empty('expired', 'Your session has ended. Please sign in again.'); }
     };
     adapter.onTokenExpired = () => { if (acceptsCredentials && !loggingOut) void tokenForRequest().catch(() => {}); };
@@ -107,6 +111,7 @@ async function initialize(): Promise<void> {
       checkLoginIframe: false, redirectUri: rootRedirect, responseMode: 'fragment' });
     adapterReady = true;
     synchronize();
+    finishReturnRoute(callback && acceptsCredentials && !loggingOut);
   } catch {
     clearCredentials();
     empty('error', 'Authentication could not start. Check the identity service and public configuration, then reload this page.');
@@ -121,6 +126,7 @@ export async function login(): Promise<void> {
   await refreshing?.catch(() => {});
   if (revision !== startedRevision || loggingOut) { loggingIn = false; return; }
   acceptsCredentials = true;
+  rememberReturnRoute();
   try { await adapter.login({ redirectUri: rootRedirect }); }
   catch {
     clearCredentials();
@@ -128,6 +134,7 @@ export async function login(): Promise<void> {
   } finally { loggingIn = false; }
 }
 export async function logout(): Promise<void> {
+  clearReturnRoute();
   if (loggingOut) return;
   ++revision;
   loggingOut = true;

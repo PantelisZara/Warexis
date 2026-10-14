@@ -45,6 +45,9 @@ async function authenticated(roles = ['WAREXIS_VIEWER']) {
 beforeEach(() => {
   vi.resetModules();
   factory.create.mockReset();
+  window.history.replaceState(null, '', '/');
+  window.sessionStorage.clear();
+  window.localStorage.clear();
   vi.stubEnv('VITE_KEYCLOAK_URL', 'http://127.0.0.1:18080');
   vi.stubEnv('VITE_KEYCLOAK_REALM', 'warexis');
   vi.stubEnv('VITE_KEYCLOAK_CLIENT_ID', 'warexis-operations');
@@ -190,5 +193,97 @@ describe('official adapter session (mocked adapter only)', () => {
     const { session } = await authenticated(); const listener = vi.fn(); const remove = session.subscribeAuth(listener);
     await session.logout(); expect(listener).toHaveBeenCalled(); listener.mockClear(); remove(); await session.logout();
     expect(listener).not.toHaveBeenCalled(); expect(local).not.toHaveBeenCalled(); expect(log).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('route recovery around official adapter initialization', () => {
+  const orderId = '00000000-0000-0000-0000-000000000001';
+  const route = `/fulfillment?orderId=${orderId}`;
+  const callback = '/#state=unit-state&session_state=unit-session&code=unit-private-code';
+  async function redirectedDocument() {
+    vi.resetModules();
+    window.history.replaceState(null, '', route);
+    const mock = makeAdapter();
+    // A real top-level redirect leaves this document before init resolves.
+    mock.init.mockReturnValue(new Promise<boolean>(() => {}));
+    const session = await import('./session');
+    void session.initializeAuth();
+    expect(window.sessionStorage.length).toBe(1);
+    vi.resetModules();
+    window.history.replaceState(null, '', callback);
+  }
+  it('restores fulfillment and its single UUID after a separate callback document finishes SDK initialization', async () => {
+    await redirectedDocument();
+    const mock = makeAdapter(); const pending = deferred<boolean>(); mock.init.mockReturnValue(pending.promise);
+    const session = await import('./session'); const initializing = session.initializeAuth();
+    expect(window.location.pathname).toBe('/');
+    signedIn(mock.instance, ['WAREXIS_OPERATOR']);
+    // The SDK removes the OAuth fragment before init resolves.
+    window.history.replaceState(null, '', '/'); pending.resolve(true); await initializing;
+    expect(window.location.pathname + window.location.search).toBe(route);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(session.getAuthSnapshot()).toMatchObject({ status: 'authenticated', canOperate: true });
+  });
+  it('preserves the current route for explicit login, with only navigation metadata in sessionStorage', async () => {
+    window.history.replaceState(null, '', route);
+    const mock = makeAdapter(); const session = await import('./session'); await session.initializeAuth();
+    expect(window.sessionStorage.length).toBe(0);
+    await session.login();
+    expect(mock.login).toHaveBeenCalledWith({ redirectUri: rootRedirect });
+    const stored = window.sessionStorage.getItem('warexis.auth.return-route');
+    expect(JSON.parse(stored!)).toEqual({ path: '/fulfillment', orderId, createdAt: expect.any(Number) });
+    expect(window.localStorage.length).toBe(0);
+    vi.resetModules(); window.history.replaceState(null, '', callback);
+    const next = makeAdapter(); signedIn(next.instance);
+    next.init.mockImplementation(async () => { window.history.replaceState(null, '', '/'); return true; });
+    const returned = await import('./session'); await returned.initializeAuth();
+    expect(window.location.pathname + window.location.search).toBe(route);
+  });
+  it('can restore an anonymous check-sso return without granting any permission', async () => {
+    await redirectedDocument(); window.history.replaceState(null, '', '/#state=unit-state&error=login_required');
+    const mock = makeAdapter();
+    mock.init.mockImplementation(async () => { window.history.replaceState(null, '', '/'); return false; });
+    const session = await import('./session'); await session.initializeAuth();
+    expect(window.location.pathname + window.location.search).toBe(route);
+    expect(session.getAuthSnapshot()).toMatchObject({ status: 'anonymous', canRead: false, canOperate: false });
+  });
+  it('does not restore when SDK initialization fails or leaves an unprocessed fragment', async () => {
+    await redirectedDocument(); const mock = makeAdapter(); mock.init.mockRejectedValue(new Error('invalid OAuth response'));
+    const session = await import('./session'); await session.initializeAuth();
+    expect(window.location.pathname).toBe('/'); expect(window.sessionStorage.length).toBe(0);
+    expect(session.getAuthSnapshot().status).toBe('error');
+    await redirectedDocument(); const next = makeAdapter(); signedIn(next.instance); next.init.mockResolvedValue(true);
+    const returned = await import('./session'); await returned.initializeAuth();
+    expect(window.location.pathname).toBe('/'); expect(window.location.hash).not.toBe('');
+    expect(window.sessionStorage.length).toBe(0);
+  });
+  it('discards stale navigation on an ordinary root visit and keeps logout at root', async () => {
+    await redirectedDocument(); window.history.replaceState(null, '', '/');
+    const mock = makeAdapter(); signedIn(mock.instance);
+    const session = await import('./session'); await session.initializeAuth();
+    expect(window.location.pathname).toBe('/'); expect(window.sessionStorage.length).toBe(0);
+    window.history.replaceState(null, '', route); await session.login();
+    expect(window.sessionStorage.length).toBe(1); await session.logout();
+    expect(window.sessionStorage.length).toBe(0);
+    vi.resetModules(); window.history.replaceState(null, '', callback);
+    const next = makeAdapter(); signedIn(next.instance);
+    next.init.mockImplementation(async () => { window.history.replaceState(null, '', '/'); return true; });
+    const returned = await import('./session'); await returned.initializeAuth();
+    expect(window.location.pathname).toBe('/');
+  });
+  it('clears pending navigation if explicit login fails', async () => {
+    window.history.replaceState(null, '', route);
+    const mock = makeAdapter(); const session = await import('./session'); await session.initializeAuth();
+    mock.login.mockRejectedValue(new Error('identity unavailable')); await session.login();
+    expect(window.sessionStorage.length).toBe(0); expect(session.getAuthSnapshot().status).toBe('error');
+  });
+  it('does not let blocked storage prevent SDK authentication', async () => {
+    window.history.replaceState(null, '', route);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage blocked'); });
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage blocked'); });
+    const { session } = await authenticated();
+    expect(session.getAuthSnapshot().status).toBe('authenticated');
+    await expect(session.login()).resolves.toBeUndefined(); await expect(session.logout()).resolves.toBeUndefined();
   });
 });
