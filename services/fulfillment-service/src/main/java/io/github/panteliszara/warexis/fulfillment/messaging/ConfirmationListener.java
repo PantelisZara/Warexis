@@ -22,6 +22,7 @@ import org.springframework.stereotype.Component;
 @ConditionalOnProperty(name = "warexis.messaging.enabled", havingValue = "true")
 public class ConfirmationListener {
     private static final Logger LOG = LoggerFactory.getLogger(ConfirmationListener.class);
+    private final io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics;
     private final FulfillmentService outcomes;
     private final DeliveryState deliveries;
     private final KafkaTemplate<byte[], byte[]> kafka;
@@ -29,6 +30,15 @@ public class ConfirmationListener {
 
     public ConfirmationListener(FulfillmentService outcomes, DeliveryState deliveries,
             KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry) {
+        this(outcomes, deliveries, kafka, registry,
+                new io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics(null, false));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ConfirmationListener(FulfillmentService outcomes, DeliveryState deliveries,
+            KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
+            io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics) {
+        this.metrics = metrics;
         this.outcomes = outcomes;
         this.deliveries = deliveries;
         this.kafka = kafka;
@@ -39,6 +49,7 @@ public class ConfirmationListener {
     public void receive(ConsumerRecord<byte[], byte[]> record, Acknowledgment ack, Consumer<byte[], byte[]> consumer) {
         Confirmation outcome = null;
         int attempt = 0;
+        boolean completedHere = false;
         try {
             while (true) {
                 var state = deliveries.load(record);
@@ -47,6 +58,7 @@ public class ConfirmationListener {
                         ? state.processingAttempts() : state.dltAttempts();
                 if (state.phase().equals("COMPLETE")) {
                     ack.acknowledge();
+                    if (!completedHere) metrics.duplicate();
                     return;
                 }
                 if (state.phase().equals("PAUSED")) {
@@ -62,6 +74,8 @@ public class ConfirmationListener {
                     }
                     if (outcome != null && outcome.eventType().equals("OrderPlaced")) {
                         deliveries.complete(record);
+                        completedHere = true;
+                        metrics.ignored();
                         logOutcome("COMPLETE", state.processingAttempts(), outcome, record);
                         continue;
                     }
@@ -89,19 +103,25 @@ public class ConfirmationListener {
                 }
                 attempt++;
                 if (state.phase().equals("PROCESS")) {
+                    boolean newDecision;
+                    if (state.processingAttempts() > 0) metrics.processRetried();
                     try {
                         outcome = EventJson.confirmation(record.key(), record.value());
-                        outcomes.accept(outcome);
+                        newDecision = outcomes.accept(outcome);
                     } catch (PoisonMessageException ex) {
+                        metrics.processFailed();
                         logOutcome("DLT", state.processingAttempts() + 1, outcome, record);
                         deliveries.toDlt(record, "INVALID_OR_CONFLICTING");
                         continue;
                     } catch (Exception ex) {
+                        metrics.processFailed();
                         logOutcome("PROCESS_RETRY", state.processingAttempts() + 1, outcome, record);
                         continue;
                     }
                     // A completion-metadata failure must escape to fail-closed pause, not spend another business attempt.
                     deliveries.complete(record);
+                    completedHere = true;
+                    metrics.processed(newDecision);
                     logOutcome("COMPLETE", state.processingAttempts() + 1, outcome, record);
                 } else {
                     var dlt = new ProducerRecord<byte[], byte[]>(KafkaConfiguration.DLT, record.partition(), record.key(), record.value());
@@ -113,16 +133,21 @@ public class ConfirmationListener {
                     header(dlt, "warexis-processing-attempts", Integer.toString(state.processingAttempts()));
                     header(dlt, "warexis-dlt-attempts", Integer.toString(state.dltAttempts() + 1));
                     header(dlt, "warexis-failed-at", Instant.now().toString());
+                    if (state.dltAttempts() > 0) metrics.dltRetried();
                     try {
                         kafka.send(dlt).get(12, TimeUnit.SECONDS);
                     } catch (InterruptedException ex) {
+                        metrics.dltFailed();
                         throw ex;
                     } catch (Exception ex) {
+                        metrics.dltFailed();
                         logOutcome("DLT_RETRY", state.dltAttempts() + 1, outcome, record);
                         continue;
                     }
                     // The broker acknowledged; failure to checkpoint that fact must pause without another send.
                     deliveries.complete(record);
+                    completedHere = true;
+                    metrics.dlt();
                     logOutcome("DLT_COMPLETE", state.dltAttempts() + 1, outcome, record);
                 }
             }
@@ -142,6 +167,7 @@ public class ConfirmationListener {
         var container = registry.getListenerContainer("fulfillment-order");
         if (container != null) {
             container.pausePartition(partition);
+            metrics.paused();
         }
         LOG.error("Fulfillment confirmation partition paused; partition={}, offset={}", record.partition(), record.offset());
     }

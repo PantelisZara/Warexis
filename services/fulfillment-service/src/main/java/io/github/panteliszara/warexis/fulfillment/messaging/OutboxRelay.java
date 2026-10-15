@@ -22,6 +22,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @ConditionalOnProperty(name = "warexis.messaging.enabled", havingValue = "true")
 public class OutboxRelay {
     private static final Logger LOG = LoggerFactory.getLogger(OutboxRelay.class);
+    private final io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics;
     private final DataSource dataSource;
     private final JdbcClient jdbc;
     private final KafkaTemplate<byte[], byte[]> kafka;
@@ -30,6 +31,15 @@ public class OutboxRelay {
 
     public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
             MessagingProperties properties, PlatformTransactionManager transactions) {
+        this(dataSource, jdbc, kafka, properties, transactions,
+                new io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics(null, false));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
+            MessagingProperties properties, PlatformTransactionManager transactions,
+            io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics) {
+        this.metrics = metrics;
         this.dataSource = dataSource;
         this.jdbc = jdbc;
         this.kafka = kafka;
@@ -80,13 +90,16 @@ public class OutboxRelay {
                         WHERE event_id = :id AND published_at IS NULL AND publication_attempts < 5
                         """).param("id", event.id()).param("next", Timestamp.from(Instant.now().plus(
                         properties.retryBaseDelay().multipliedBy(1L << event.attempts())))).update()));
+                if (event.attempts() > 0) metrics.publicationRetried();
                 try {
                     kafka.send(KafkaConfiguration.FULFILLMENT_TOPIC, key, body).get(12, TimeUnit.SECONDS);
                     transaction.executeWithoutResult(status -> requireOne(jdbc.sql("""
                             UPDATE outbox_events SET published_at = GREATEST(CURRENT_TIMESTAMP, occurred_at), next_attempt_at = NULL
                             WHERE event_id = :id AND published_at IS NULL
                             """).param("id", event.id()).update()));
+                    metrics.published();
                 } catch (Exception ex) {
+                    metrics.publicationFailed();
                     if (ex instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
                     }

@@ -36,6 +36,23 @@ class SecurityTests {
         assertStateless(response);
     }
 
+    @Test void scrapeRequiresDedicatedMetricsRoleWithoutBusinessPrivileges() throws Exception {
+        assertProblem(request("GET","/actuator/prometheus",null,null),401);
+        for (var role:List.of("WAREXIS_VIEWER","WAREXIS_OPERATOR")) {
+            assertProblem(request("GET","/actuator/prometheus","Bearer "+TestJwtConfiguration.token(role, c -> {}),null),403);
+        }
+        var bearer="Bearer "+TestJwtConfiguration.token("WAREXIS_METRICS",c -> {});
+        var scrape=request("GET","/actuator/prometheus",bearer,null);
+        assertThat(scrape.statusCode()).isEqualTo(200);
+        assertThat(scrape.body()).contains("warexis_messaging_deliveries_total", "service=\"fulfillment\"",
+                "http_server_requests_seconds_bucket", "jvm_memory_used_bytes", "process_cpu_usage", "hikaricp_connections");
+        assertThat(scrape.body()).doesNotContain("disk_free_bytes", "disk_total_bytes", "path=\"",
+                System.getProperty("user.dir"), System.getProperty("user.home"));
+        assertProblem(request("GET","/api/fulfillments/"+UUID.randomUUID(),bearer,null),403);
+        assertProblem(request("POST","/api/fulfillments/"+UUID.randomUUID()+"/ship",bearer,"{\"shipmentReference\":\"DENIED\"}"),403);
+        assertProblem(request("GET","/actuator/env",bearer,null),403);
+    }
+
     @Test void missingTokenAndBasicAreUnauthorizedWithoutSessionOrLoginRedirect() throws Exception {
         for (var authorization : Arrays.asList(null,"Basic dGVzdDp0ZXN0")) {
             var response=request("GET","/api/fulfillments/"+UUID.randomUUID(),authorization,null);

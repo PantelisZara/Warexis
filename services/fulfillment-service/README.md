@@ -36,6 +36,34 @@ Only `GET /actuator/health` is anonymous, without components or sensitive detail
 See the [complete authorization matrix](../../docs/architecture/security.md) and
 [local Keycloak/token guide](../../infrastructure/auth/README.md).
 
+## Operational metrics
+
+`GET /actuator/prometheus` requires the dedicated `WAREXIS_METRICS` realm role.
+Viewer/operator roles alone cannot scrape, and a metrics-only identity has no
+business API rights. Only health and Prometheus are exposed. Framework HTTP,
+JVM, process and Hikari meters carry the fixed `service=fulfillment` label;
+HTTP duration histograms support percentile queries.
+
+Custom process-local counters observe outbox publications (`published` only
+after broker acknowledgment and committed metadata, otherwise actual `failed`
+attempts), outbox retries, messaging delivery completions (`processed`, known
+`duplicate`, valid unsubscribed `ignored`, acknowledged and durably completed
+`dlt`), processing/DLT failures and retries, and listener partition pause requests.
+The pause counter excludes rebalance restoration and does not represent the
+current number of paused partitions. Retry counters exclude backoff polls.
+Completion metadata failure does not count success. Counters reset on restart;
+they are operational observations, not durable business totals. Custom labels
+are limited to the fixed `result` and `stage` values, never business identifiers.
+Registry failure or disabling metrics does not change business processing.
+
+Outbox gauges share a cached, indexed PostgreSQL snapshot. The pending count is
+capped at 10001 (`10001` means at least that many); oldest age uses database time,
+clamped to zero for empty/future events. A dedicated daemon thread refreshes at
+most every 15 seconds with a one-second query timeout, scanning at most 10001
+pending index entries. Scrapes never wait for the business connection pool.
+Initial, failed or over-30-second-old snapshots expose `NaN` count/age and
+`warexis_outbox_snapshot_available=0`, rather than a misleading healthy zero.
+
 ## Owned HTTP API
 
 - `GET /api/fulfillments/{id}` returns the owned projection, or 404.
