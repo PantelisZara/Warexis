@@ -1,0 +1,65 @@
+# Linux-only local monitoring: host networking reaches loopback-bound host JVMs.
+# Generate the private runtime with scripts/prepare-monitoring.py first.
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    user: "${WAREXIS_MONITORING_UID:?Prepare monitoring runtime}:${WAREXIS_MONITORING_GID:?Prepare monitoring runtime}"
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.json
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --storage.tsdb.retention.size=512MB
+      - --web.listen-address=127.0.0.1:${WAREXIS_PROMETHEUS_PORT:?Prepare monitoring runtime}
+    volumes:
+      - ${WAREXIS_MONITORING_RUNTIME:?Prepare monitoring runtime}/prometheus.json:/etc/prometheus/prometheus.json:ro
+      - ${WAREXIS_COLLECTOR_SECRET_FILE:?Prepare monitoring runtime}:/run/secrets/collector-secret:ro
+      - ${WAREXIS_MONITORING_RUNTIME:?Prepare monitoring runtime}/prometheus-data:/prometheus
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:${WAREXIS_PROMETHEUS_PORT}/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    user: "${WAREXIS_MONITORING_UID:?Prepare monitoring runtime}:${WAREXIS_MONITORING_GID:?Prepare monitoring runtime}"
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: ${WAREXIS_GRAFANA_PORT:?Prepare monitoring runtime}
+      GF_SERVER_ROOT_URL: http://127.0.0.1:${WAREXIS_GRAFANA_PORT}/
+      GF_SECURITY_ADMIN_USER: warexis-admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin-password
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PATHS_DATA: /var/lib/grafana
+      GF_PATHS_LOGS: /var/lib/grafana/logs
+      GF_PATHS_PLUGINS: /var/lib/grafana/plugins
+      WAREXIS_PROMETHEUS_URL: http://127.0.0.1:${WAREXIS_PROMETHEUS_PORT}/
+    volumes:
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${WAREXIS_MONITORING_RUNTIME:?Prepare monitoring runtime}/grafana-admin-password:/run/secrets/grafana-admin-password:ro
+      - ${WAREXIS_MONITORING_RUNTIME:?Prepare monitoring runtime}/grafana-data:/var/lib/grafana
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:${WAREXIS_GRAFANA_PORT}/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
