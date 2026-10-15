@@ -26,9 +26,19 @@ public class OutboxRelay {
     private final KafkaTemplate<byte[], byte[]> kafka;
     private final MessagingProperties properties;
     private final TransactionTemplate transaction;
+    private final io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics;
 
     public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
             MessagingProperties properties, PlatformTransactionManager transactions) {
+        this(dataSource, jdbc, kafka, properties, transactions,
+                new io.github.panteliszara.warexis.order.observability.OperationalMetrics(null, false));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
+            MessagingProperties properties, PlatformTransactionManager transactions,
+            io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics) {
+        this.metrics = metrics;
         this.dataSource = dataSource;
         this.jdbc = jdbc;
         this.kafka = kafka;
@@ -80,12 +90,15 @@ public class OutboxRelay {
                         """).param("id", event.id()).param("next", Timestamp.from(Instant.now().plus(
                         properties.retryBaseDelay().multipliedBy(1L << event.attempts())))).update()));
                 try {
+                    if (event.attempts() > 0) metrics.publicationRetried();
                     kafka.send(KafkaConfiguration.ORDER_TOPIC, key, body).get(12, TimeUnit.SECONDS);
                     transaction.executeWithoutResult(status -> requireOne(jdbc.sql("""
                             UPDATE outbox_events SET published_at = GREATEST(CURRENT_TIMESTAMP, occurred_at), next_attempt_at = NULL
                             WHERE event_id = :id AND published_at IS NULL
                             """).param("id", event.id()).update()));
+                    metrics.published();
                 } catch (Exception ex) {
+                    metrics.publicationFailed();
                     if (ex instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
                     }

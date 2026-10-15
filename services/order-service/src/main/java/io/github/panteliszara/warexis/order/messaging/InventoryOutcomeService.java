@@ -26,7 +26,7 @@ public class InventoryOutcomeService {
     }
 
     @Transactional
-    public void apply(InventoryOutcome outcome) {
+    public boolean apply(InventoryOutcome outcome) {
         jdbc.sql("SELECT pg_advisory_xact_lock(92, hashtext(:id))")
                 .param("id", outcome.eventId().toString()).query(Object.class).single();
         var incoming = mapper.writeValueAsString(outcome);
@@ -36,7 +36,7 @@ public class InventoryOutcomeService {
             if (!mapper.readTree(replay.get()).equals(mapper.readTree(incoming))) {
                 throw new PoisonMessageException();
             }
-            return;
+            return false;
         }
         jdbc.sql("SELECT pg_advisory_xact_lock(93, hashtext(:id))")
                 .param("id", outcome.reservationId().toString()).query(Object.class).single();
@@ -77,8 +77,10 @@ public class InventoryOutcomeService {
                 outbox.append(OutboxEvent.orderConfirmed(order, outcome.reservationId(), outcome.eventId(), order.getUpdatedAt(), mapper));
             }
         }
+        boolean newDecision = existing.isEmpty();
         requireOne(jdbc.sql("INSERT INTO processed_inventory_events VALUES (:id,:orderId,CAST(:json AS jsonb))")
                 .param("id", outcome.eventId()).param("orderId", order.getId()).param("json", incoming).update());
+        return newDecision;
     }
 
     private void requireOne(int rows) {

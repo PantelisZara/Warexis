@@ -24,9 +24,19 @@ public class InventoryOutcomeListener {
     private final DeliveryState deliveries;
     private final KafkaTemplate<byte[], byte[]> kafka;
     private final KafkaListenerEndpointRegistry registry;
+    private final io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics;
 
     public InventoryOutcomeListener(InventoryOutcomeService outcomes, DeliveryState deliveries,
             KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry) {
+        this(outcomes, deliveries, kafka, registry,
+                new io.github.panteliszara.warexis.order.observability.OperationalMetrics(null, false));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public InventoryOutcomeListener(InventoryOutcomeService outcomes, DeliveryState deliveries,
+            KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
+            io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics) {
+        this.metrics = metrics;
         this.outcomes = outcomes;
         this.deliveries = deliveries;
         this.kafka = kafka;
@@ -37,6 +47,7 @@ public class InventoryOutcomeListener {
     public void receive(ConsumerRecord<byte[], byte[]> record, Acknowledgment ack, Consumer<byte[], byte[]> consumer) {
         InventoryOutcome outcome = null;
         int attempt = 0;
+        boolean completedHere = false;
         try {
             while (true) {
                 var state = deliveries.load(record);
@@ -45,6 +56,7 @@ public class InventoryOutcomeListener {
                         ? state.processingAttempts() : state.dltAttempts();
                 if (state.phase().equals("COMPLETE")) {
                     ack.acknowledge();
+                    if (!completedHere) metrics.duplicate();
                     return;
                 }
                 if (state.phase().equals("PAUSED")) {
@@ -74,19 +86,25 @@ public class InventoryOutcomeListener {
                 }
                 attempt++;
                 if (state.phase().equals("PROCESS")) {
+                    boolean newDecision;
+                    if (state.processingAttempts() > 0) metrics.processRetried();
                     try {
                         outcome = EventJson.outcome(record.key(), record.value());
-                        outcomes.apply(outcome);
+                        newDecision = outcomes.apply(outcome);
                     } catch (PoisonMessageException ex) {
+                        metrics.processFailed();
                         logOutcome("DLT", state.processingAttempts() + 1, outcome, record);
                         deliveries.toDlt(record, "INVALID_OR_CONFLICTING");
                         continue;
                     } catch (Exception ex) {
+                        metrics.processFailed();
                         logOutcome("PROCESS_RETRY", state.processingAttempts() + 1, outcome, record);
                         continue;
                     }
                     // A completion-metadata failure must escape to fail-closed pause, not spend another business attempt.
                     deliveries.complete(record);
+                    completedHere = true;
+                    metrics.processed(newDecision);
                     logOutcome("COMPLETE", state.processingAttempts() + 1, outcome, record);
                 } else {
                     var dlt = new ProducerRecord<byte[], byte[]>(KafkaConfiguration.DLT, record.partition(), record.key(), record.value());
@@ -98,16 +116,21 @@ public class InventoryOutcomeListener {
                     header(dlt, "warexis-processing-attempts", Integer.toString(state.processingAttempts()));
                     header(dlt, "warexis-dlt-attempts", Integer.toString(state.dltAttempts() + 1));
                     header(dlt, "warexis-failed-at", Instant.now().toString());
+                    if (state.dltAttempts() > 0) metrics.dltRetried();
                     try {
                         kafka.send(dlt).get(12, TimeUnit.SECONDS);
                     } catch (InterruptedException ex) {
+                        metrics.dltFailed();
                         throw ex;
                     } catch (Exception ex) {
+                        metrics.dltFailed();
                         logOutcome("DLT_RETRY", state.dltAttempts() + 1, outcome, record);
                         continue;
                     }
                     // The broker acknowledged; failure to checkpoint that fact must pause without another send.
                     deliveries.complete(record);
+                    completedHere = true;
+                    metrics.dlt();
                     logOutcome("DLT_COMPLETE", state.dltAttempts() + 1, outcome, record);
                 }
             }
@@ -127,6 +150,7 @@ public class InventoryOutcomeListener {
         var container = registry.getListenerContainer("order-inventory");
         if (container != null) {
             container.pausePartition(partition);
+            metrics.paused();
         }
         LOG.error("Order inventory partition paused; partition={}, offset={}", record.partition(), record.offset());
     }

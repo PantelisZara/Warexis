@@ -35,6 +35,23 @@ class OrderSecurityTests {
         assertThat(response.body()).doesNotContain("components", "details", "jdbc", "password");
         assertThat(response.headers().allValues("Set-Cookie")).isEmpty();
     }
+    @Test void metricsRoleIsIsolatedAndBusinessRolesCannotScrape() throws Exception {
+        assertThat(request("GET", "/actuator/prometheus", null, null).statusCode()).isEqualTo(401);
+        assertThat(request("GET", "/actuator/prometheus", TestJwtTokens.viewer(), null).statusCode()).isEqualTo(403);
+        assertThat(request("GET", "/actuator/prometheus", TestJwtTokens.operator(), null).statusCode()).isEqualTo(403);
+        var metricsToken = TestJwtTokens.token("WAREXIS_METRICS", claims -> {});
+        var scrape = request("GET", "/actuator/prometheus", metricsToken, null);
+        assertThat(scrape.statusCode()).isEqualTo(200);
+        assertThat(scrape.body()).contains("service=\"order\"", "warexis_outbox_pending", "warexis_outbox_oldest_age_seconds",
+                "warexis_outbox_snapshot_available", "http_server_requests_seconds_bucket",
+                "jvm_memory_used_bytes", "process_cpu_usage", "hikaricp_connections");
+        assertThat(scrape.body()).doesNotContain("disk_free_bytes", "disk_total_bytes", "path=\"",
+                System.getProperty("user.dir"), System.getProperty("user.home"));
+        assertThat(scrape.body()).doesNotContain("eventId=", "orderId=", "sku=", metricsToken);
+        problem(request("GET", ORDER, metricsToken, null), 403, "Access is denied.");
+        problem(request("POST", "/api/orders", metricsToken, BODY), 403, "Access is denied.");
+        problem(request("GET", "/actuator/env", metricsToken, null), 403, "Access is denied.");
+    }
     @Test void missingTokenGetsGenericBearerChallengeWithoutSession() throws Exception {
         var response = request("GET", ORDER, null, null);
         problem(response, 401, "Authentication is required.");

@@ -34,6 +34,57 @@ class OutboxRelayReliabilityTests {
     @Autowired OrderService orders;
     @Autowired io.github.panteliszara.warexis.order.messaging.InventoryOutcomeService outcomes;
 
+    @Test
+    void terminalMetricsFollowAnAmbientTransactionCommitAndRemainZeroOnRollback() {
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var metrics=new io.github.panteliszara.warexis.order.observability.OperationalMetrics(registry,true);
+        var transaction=new org.springframework.transaction.support.TransactionTemplate(transactions);
+        transaction.executeWithoutResult(status->{
+            metrics.published(); metrics.processed(true); metrics.dlt();
+            assertThat(registry.get("warexis.outbox.publications").tag("result","published").counter().count()).isZero();
+            status.setRollbackOnly();
+        });
+        assertThat(registry.get("warexis.outbox.publications").tag("result","published").counter().count()).isZero();
+        assertThat(registry.get("warexis.messaging.deliveries").tag("result","processed").counter().count()).isZero();
+        assertThat(registry.get("warexis.messaging.deliveries").tag("result","dlt").counter().count()).isZero();
+        transaction.executeWithoutResult(status->{ metrics.published(); metrics.processed(true); metrics.dlt(); });
+        assertThat(registry.get("warexis.outbox.publications").tag("result","published").counter().count()).isEqualTo(1);
+        assertThat(registry.get("warexis.messaging.deliveries").tag("result","processed").counter().count()).isEqualTo(1);
+        assertThat(registry.get("warexis.messaging.deliveries").tag("result","dlt").counter().count()).isEqualTo(1);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"success","broker-failure","completion-failure"})
+    @SuppressWarnings("unchecked")
+    void publicationMetricsRequireBrokerAckAndCommittedCompletion(String mode) {
+        jdbc.sql("UPDATE outbox_events SET published_at=GREATEST(CURRENT_TIMESTAMP,occurred_at) WHERE published_at IS NULL").update();
+        var order=orders.create(List.of(new OrderLineInput("Metric",1)));
+        var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var metrics=new io.github.panteliszara.warexis.order.observability.OperationalMetrics(registry,true);
+        var kafka=(KafkaTemplate<byte[],byte[]>)mock(KafkaTemplate.class);
+        when(kafka.send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class)))
+                .thenReturn(mode.equals("broker-failure")?CompletableFuture.failedFuture(new IllegalStateException()):CompletableFuture.completedFuture(null));
+        if(mode.equals("completion-failure")) {
+            jdbc.sql("CREATE FUNCTION reject_metric_publication() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN IF NEW.published_at IS NOT NULL THEN RAISE EXCEPTION ''synthetic metadata failure''; END IF; RETURN NEW; END'").update();
+            jdbc.sql("CREATE TRIGGER reject_metric_publication BEFORE UPDATE ON outbox_events FOR EACH ROW EXECUTE FUNCTION reject_metric_publication()").update();
+        }
+        try {
+            // This is an actual second send attempt, not a wait/pause observation.
+            jdbc.sql("UPDATE outbox_events SET publication_attempts=1 WHERE aggregate_id=:id").param("id",order.id()).update();
+            new OutboxRelay(dataSource,jdbc,kafka,new MessagingProperties(false,Duration.ofMillis(10),Duration.ofMillis(50)),transactions,metrics).publishNext();
+            assertThat(registry.get("warexis.outbox.publications").tag("result","published").counter().count()).isEqualTo(mode.equals("success")?1:0);
+            assertThat(registry.get("warexis.outbox.publications").tag("result","failed").counter().count()).isEqualTo(mode.equals("success")?0:1);
+            assertThat(registry.get("warexis.outbox.retries").counter().count()).isEqualTo(1);
+            assertThat(jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id").param("id",order.id()).query(Boolean.class).single()).isEqualTo(mode.equals("success"));
+        } finally {
+            if(mode.equals("completion-failure")) {
+                jdbc.sql("DROP TRIGGER reject_metric_publication ON outbox_events").update();
+                jdbc.sql("DROP FUNCTION reject_metric_publication()").update();
+            }
+            jdbc.sql("UPDATE outbox_events SET published_at=GREATEST(CURRENT_TIMESTAMP,occurred_at) WHERE published_at IS NULL").update();
+        }
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings={"OrderPlaced","OrderConfirmed"})
     @SuppressWarnings("unchecked")
