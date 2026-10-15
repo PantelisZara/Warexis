@@ -1,5 +1,8 @@
 package io.github.panteliszara.warexis.inventory.messaging;
 
+import io.github.panteliszara.warexis.inventory.observability.InventoryMetrics;
+import org.springframework.beans.factory.annotation.Autowired;
+
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Set;
@@ -29,9 +32,18 @@ public class InventoryOrderListener {
     private final WorkflowEventValidator validator;
     private final InventoryReservationService reservations;
     private final KafkaTemplate<byte[], byte[]> kafka;
+    private final InventoryMetrics metrics;
 
     public InventoryOrderListener(ConsumerDeliveryStore delivery, WorkflowEventValidator validator,
                                   InventoryReservationService reservations, KafkaTemplate<byte[], byte[]> kafka) {
+        this(delivery, validator, reservations, kafka, InventoryMetrics.disabled());
+    }
+
+    @Autowired
+    public InventoryOrderListener(ConsumerDeliveryStore delivery, WorkflowEventValidator validator,
+                                  InventoryReservationService reservations, KafkaTemplate<byte[], byte[]> kafka,
+                                  InventoryMetrics metrics) {
+        this.metrics = metrics;
         this.delivery = delivery;
         this.validator = validator;
         this.reservations = reservations;
@@ -43,12 +55,17 @@ public class InventoryOrderListener {
     public void receive(ConsumerRecord<byte[], byte[]> record, Acknowledgment acknowledgment, Consumer<?, ?> consumer) {
         int processingAttempt = 0;
         int dltAttempt = 0;
+        String completedOutcome = "duplicate";
         try {
             while (true) {
                 var state = delivery.load(record);
                 processingAttempt = state.processingAttempts();
                 dltAttempt = state.dltAttempts();
-                if (state.phase().equals("COMPLETE")) { acknowledgment.acknowledge(); return; }
+                if (state.phase().equals("COMPLETE")) {
+                    acknowledgment.acknowledge();
+                    metrics.delivery(completedOutcome);
+                    return;
+                }
                 if (state.phase().equals("PAUSED")) { pause(record, consumer); return; }
                 if (state.phase().equals("DLT")) {
                     if (state.dltAttempts() >= 4) {
@@ -57,6 +74,7 @@ public class InventoryOrderListener {
                     }
                     await(state.nextAttemptAt());
                     if (!delivery.beginAttempt(record, state, true)) continue;
+                    if (state.dltAttempts() > 0) metrics.retry("dlt");
                     dltAttempt++;
                     try {
                         var quarantined = new ProducerRecord<byte[], byte[]>(DLT, record.partition(), record.key(), record.value());
@@ -71,6 +89,7 @@ public class InventoryOrderListener {
                         kafka.send(quarantined).get(11, TimeUnit.SECONDS);
                         diagnostic(record, processingAttempt, dltAttempt, "DLT_ACKNOWLEDGED", state.failureCode());
                     } catch (Exception exception) {
+                        metrics.failure("dlt");
                         diagnostic(record, processingAttempt, dltAttempt, "DLT_RETRY", "BROKER_UNAVAILABLE");
                         if (exception instanceof InterruptedException) {
                             Thread.currentThread().interrupt();
@@ -80,17 +99,23 @@ public class InventoryOrderListener {
                         }
                         continue;
                     }
-                    delivery.transition(record, "COMPLETE", state.failureCode());
+                    try {
+                        if (delivery.transition(record, "COMPLETE", state.failureCode())) completedOutcome = "dlt";
+                    } catch (RuntimeException exception) {
+                        metrics.failure("dlt");
+                        throw exception;
+                    }
                     continue;
                 }
                 WorkflowEventValidator.Validated event;
                 try { event = validator.validate(record.key(), record.value()); }
                 catch (InvalidEventException exception) {
+                    metrics.failure("process");
                     if (delivery.transition(record, "DLT", "INVALID_CONTRACT")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "INVALID_CONTRACT");
                     continue;
                 }
                 if (!event.eventType().equals("OrderPlaced")) {
-                    delivery.transition(record, "COMPLETE", null);
+                    if (delivery.transition(record, "COMPLETE", null)) completedOutcome = "ignored";
                     continue;
                 }
                 if (state.processingAttempts() >= 4) {
@@ -99,17 +124,21 @@ public class InventoryOrderListener {
                 }
                 await(state.nextAttemptAt());
                 if (!delivery.beginAttempt(record, state, false)) continue;
+                if (state.processingAttempts() > 0) metrics.retry("process");
                 processingAttempt++;
+                String outcome;
                 try {
-                    reservations.process(event.order());
+                    outcome = reservations.processWithOutcome(event.order()).duplicate() ? "duplicate" : "processed";
                 } catch (ConflictingOrderPlacedException exception) {
+                    metrics.failure("process");
                     if (delivery.transition(record, "DLT", "IDENTITY_CONFLICT")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "IDENTITY_CONFLICT");
                     continue;
                 } catch (RuntimeException exception) {
+                    metrics.failure("process");
                     diagnostic(record, processingAttempt, dltAttempt, "PROCESS_RETRY", "TECHNICAL_FAILURE");
                     continue;
                 }
-                delivery.transition(record, "COMPLETE", null);
+                if (delivery.transition(record, "COMPLETE", null)) completedOutcome = outcome;
                 // Reload the durable terminal state before acknowledging, including a lost ownership race.
                 continue;
             }
@@ -139,6 +168,7 @@ public class InventoryOrderListener {
         var partition = new TopicPartition(record.topic(), record.partition());
         consumer.seek(partition, record.offset());
         consumer.pause(Set.of(partition));
+        metrics.pause();
     }
 
     private void await(Instant due) throws InterruptedException {

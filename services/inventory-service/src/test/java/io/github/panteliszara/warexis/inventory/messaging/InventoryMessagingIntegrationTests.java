@@ -69,16 +69,23 @@ class InventoryMessagingIntegrationTests {
     @Autowired private DataSource dataSource;
     @Autowired private KafkaTemplate<byte[], byte[]> kafka;
     @Autowired private JsonMapper mapper;
+    @Autowired private io.micrometer.core.instrument.MeterRegistry meters;
+    @Autowired private io.github.panteliszara.warexis.inventory.observability.InventoryMetrics metrics;
     private final AtomicInteger offset = new AtomicInteger();
+    private static boolean producerReady;
 
     @BeforeEach
-    void resetDisposableDatabase() {
+    void resetDisposableDatabase() throws Exception {
+        awaitProducerReadiness();
         jdbc.execute("TRUNCATE outbox_events, processed_order_events, inventory_reservations, stock_items, consumer_delivery_state");
         jdbc.update("UPDATE outbox_relay_control SET paused = FALSE, failure_code = NULL");
     }
 
     @Test
     void listenerCommitsReservationBeforeAckAndPublisherWaitsForRealBrokerAck() throws Exception {
+        var processed = deliveryCount("processed");
+        var duplicates = deliveryCount("duplicate");
+        var published = publicationCount("published");
         var sku = stock(5);
         var record = event(sku, 2);
         var acknowledgment = mock(Acknowledgment.class);
@@ -92,7 +99,10 @@ class InventoryMessagingIntegrationTests {
         verify(acknowledgment).acknowledge();
         listener.receive(new ConsumerRecord<>(record.topic(), record.partition(), offset.incrementAndGet(), record.key(), record.value()), mock(Acknowledgment.class), consumer());
         assertThat(count("SELECT count(*) FROM inventory_reservations")).isEqualTo(1);
+        assertThat(deliveryCount("processed") - processed).isEqualTo(1);
+        assertThat(deliveryCount("duplicate") - duplicates).isEqualTo(1);
         publisher.publishNext();
+        assertThat(publicationCount("published") - published).isEqualTo(1);
         var sent = consume("warexis.inventory.events.v1", record.key());
         var json = mapper.readTree(sent.value());
         assertThat(json.path("eventType").asString()).isEqualTo("InventoryReserved");
@@ -196,11 +206,11 @@ class InventoryMessagingIntegrationTests {
         delivery.load(record);
         jdbc.update("UPDATE consumer_delivery_state SET processing_attempts = 2 WHERE source_offset = ?", record.offset());
         var failingBusiness = mock(InventoryReservationService.class);
-        when(failingBusiness.process(any())).thenThrow(new IllegalStateException("synthetic technical failure"));
+        when(failingBusiness.processWithOutcome(any())).thenThrow(new IllegalStateException("synthetic technical failure"));
         var restarted = new InventoryOrderListener(delivery, validator, failingBusiness, kafka);
         var acknowledgment = mock(Acknowledgment.class);
         restarted.receive(record, acknowledgment, consumer());
-        verify(failingBusiness, times(2)).process(any());
+        verify(failingBusiness, times(2)).processWithOutcome(any());
         assertThat(delivery.load(record).processingAttempts()).isEqualTo(4);
         assertThat(delivery.load(record).phase()).isEqualTo("COMPLETE");
         assertThat(consume(InventoryOrderListener.DLT, record.key()).value()).containsExactly(record.value());
@@ -209,19 +219,25 @@ class InventoryMessagingIntegrationTests {
 
     @Test
     void boundedDltFailureDurablyPausesAndRestartDoesNotRetryOrAck() {
+        var failures = meters.get("warexis.messaging.failures").tag("stage", "dlt").counter().count();
+        var retries = meters.get("warexis.messaging.retries").tag("stage", "dlt").counter().count();
+        var pauses = meters.get("warexis.messaging.pauses").counter().count();
         var record = new ConsumerRecord<byte[], byte[]>("warexis.order.events.v1", 1, offset.incrementAndGet(), new byte[]{1}, new byte[]{2});
         var failingKafka = failingKafka();
         var acknowledgment = mock(Acknowledgment.class);
         var consumer = consumer();
-        var failed = new InventoryOrderListener(delivery, validator, reservations, failingKafka);
+        var failed = new InventoryOrderListener(delivery, validator, reservations, failingKafka, metrics);
         failed.receive(record, acknowledgment, consumer);
         assertThat(delivery.load(record).phase()).isEqualTo("PAUSED");
         assertThat(delivery.load(record).dltAttempts()).isEqualTo(4);
         verify(failingKafka, times(4)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
-        new InventoryOrderListener(delivery, validator, reservations, failingKafka).receive(record, acknowledgment, consumer);
+        new InventoryOrderListener(delivery, validator, reservations, failingKafka, metrics).receive(record, acknowledgment, consumer);
         verify(failingKafka, times(4)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         verify(acknowledgment, never()).acknowledge();
         verify(consumer, times(2)).seek(new TopicPartition(record.topic(), record.partition()), record.offset());
+        assertThat(meters.get("warexis.messaging.failures").tag("stage", "dlt").counter().count() - failures).isEqualTo(4);
+        assertThat(meters.get("warexis.messaging.retries").tag("stage", "dlt").counter().count() - retries).isEqualTo(3);
+        assertThat(meters.get("warexis.messaging.pauses").counter().count() - pauses).isEqualTo(2);
         assertThat(delivery.pausedOffset(new TopicPartition(record.topic(), record.partition()))).hasValue(record.offset());
     }
 
@@ -233,11 +249,11 @@ class InventoryMessagingIntegrationTests {
         var consumer = consumer();
         jdbc.execute("ALTER TABLE consumer_delivery_state ADD CONSTRAINT test_fail_delivery_metadata CHECK (processing_attempts = 0) NOT VALID");
         try {
-            new InventoryOrderListener(delivery, validator, business, kafka).receive(record, acknowledgment, consumer);
+            new InventoryOrderListener(delivery, validator, business, kafka, metrics).receive(record, acknowledgment, consumer);
         } finally {
             jdbc.execute("ALTER TABLE consumer_delivery_state DROP CONSTRAINT test_fail_delivery_metadata");
         }
-        verify(business, never()).process(any());
+        verify(business, never()).processWithOutcome(any());
         verify(acknowledgment, never()).acknowledge();
         verify(consumer).seek(new TopicPartition(record.topic(), record.partition()), record.offset());
         assertThat(delivery.load(record).processingAttempts()).isZero();
@@ -245,10 +261,12 @@ class InventoryMessagingIntegrationTests {
 
     @Test
     void relayAttemptBudgetAndGlobalPauseSurvivePublisherRestartWithoutSkippingHead() throws Exception {
+        var failures = publicationCount("failed");
+        var retries = meters.get("warexis.outbox.retries").counter().count();
         reservations.process(input(stock(2), 1));
         reservations.process(input(stock(2), 1));
         var failingKafka = failingKafka();
-        var failed = new InventoryOutboxPublisher(dataSource, failingKafka, properties, validator);
+        var failed = new InventoryOutboxPublisher(dataSource, failingKafka, properties, validator, metrics);
         for (int attempt = 0; attempt < 5; attempt++) {
             jdbc.update("UPDATE outbox_events SET next_attempt_at = NULL");
             failed.publishNext();
@@ -256,12 +274,17 @@ class InventoryMessagingIntegrationTests {
         assertThat(jdbc.queryForObject("SELECT paused FROM outbox_relay_control", Boolean.class)).isTrue();
         assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 5 AND published_at IS NULL")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 0 AND published_at IS NULL")).isEqualTo(1);
-        new InventoryOutboxPublisher(dataSource, failingKafka, properties, validator).publishNext();
+        new InventoryOutboxPublisher(dataSource, failingKafka, properties, validator, metrics).publishNext();
         verify(failingKafka, times(5)).send(anyString(), any(byte[].class), any(byte[].class));
+        assertThat(publicationCount("failed") - failures).isEqualTo(5);
+        assertThat(meters.get("warexis.outbox.retries").counter().count() - retries).isEqualTo(4);
     }
 
     @Test
     void brokerAckFollowedByDatabaseFailureRepublishesSameEventIdentity() throws Exception {
+        var published = publicationCount("published");
+        var failed = publicationCount("failed");
+        var retries = meters.get("warexis.outbox.retries").counter().count();
         var input = input(stock(2), 1);
         reservations.process(input);
         var key = input.orderId().toString().getBytes(StandardCharsets.UTF_8);
@@ -269,9 +292,13 @@ class InventoryMessagingIntegrationTests {
         try { publisher.publishNext(); }
         finally { jdbc.execute("ALTER TABLE outbox_events DROP CONSTRAINT test_fail_publication_mark"); }
         assertThat(count("SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND publication_attempts = 1")).isEqualTo(1);
+        assertThat(publicationCount("published")).isEqualTo(published);
+        assertThat(publicationCount("failed") - failed).isEqualTo(1);
         var first = consume("warexis.inventory.events.v1", key);
         jdbc.update("UPDATE outbox_events SET next_attempt_at = NULL");
         publisher.publishNext();
+        assertThat(publicationCount("published") - published).isEqualTo(1);
+        assertThat(meters.get("warexis.outbox.retries").counter().count() - retries).isEqualTo(1);
         var copies = consumeCopies("warexis.inventory.events.v1", key, 2);
         assertThat(copies.get(0).value()).containsExactly(first.value());
         assertThat(copies.get(1).value()).containsExactly(first.value());
@@ -442,9 +469,9 @@ class InventoryMessagingIntegrationTests {
         var consumer = consumer();
         suppressDeliveryUpdate("NEW.processing_attempts > OLD.processing_attempts");
         try {
-            new InventoryOrderListener(delivery, validator, business, kafka).receive(record, acknowledgment, consumer);
+            new InventoryOrderListener(delivery, validator, business, kafka, metrics).receive(record, acknowledgment, consumer);
         } finally { removeSuppressedDeliveryUpdate(); }
-        verify(business, never()).process(any());
+        verify(business, never()).processWithOutcome(any());
         verify(acknowledgment, never()).acknowledge();
         verify(consumer).pause(java.util.Set.of(new TopicPartition(record.topic(), record.partition())));
         assertThat(delivery.load(record).processingAttempts()).isZero();
@@ -452,17 +479,19 @@ class InventoryMessagingIntegrationTests {
 
     @Test
     void suppressedCompletionAfterBusinessCommitDoesNotRepeatBusinessOrAck(org.springframework.boot.test.system.CapturedOutput output) {
+        var processed = deliveryCount("processed");
         var sku = stock(3);
         var record = event(sku, 1);
         var business = mock(InventoryReservationService.class);
-        when(business.process(any())).thenAnswer(call -> reservations.process(call.getArgument(0)));
+        when(business.processWithOutcome(any())).thenAnswer(call -> reservations.processWithOutcome(call.getArgument(0)));
         var acknowledgment = mock(Acknowledgment.class);
         var consumer = consumer();
         suppressDeliveryUpdate("NEW.phase = 'COMPLETE'");
         try {
-            new InventoryOrderListener(delivery, validator, business, kafka).receive(record, acknowledgment, consumer);
+            new InventoryOrderListener(delivery, validator, business, kafka, metrics).receive(record, acknowledgment, consumer);
         } finally { removeSuppressedDeliveryUpdate(); }
-        verify(business, times(1)).process(any());
+        assertThat(deliveryCount("processed")).isEqualTo(processed);
+        verify(business, times(1)).processWithOutcome(any());
         verify(acknowledgment, never()).acknowledge();
         verify(consumer).seek(new TopicPartition(record.topic(), record.partition()), record.offset());
         verify(consumer).pause(java.util.Set.of(new TopicPartition(record.topic(), record.partition())));
@@ -478,6 +507,7 @@ class InventoryMessagingIntegrationTests {
     @Test
     @SuppressWarnings("unchecked")
     void suppressedCompletionAfterDltBrokerAckDoesNotResendOrAck(org.springframework.boot.test.system.CapturedOutput output) {
+        var completedDlt = deliveryCount("dlt");
         var record = new ConsumerRecord<byte[], byte[]>("warexis.order.events.v1", 1, offset.incrementAndGet(),
                 UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xc3, 0x28});
         KafkaTemplate<byte[], byte[]> transport = mock(KafkaTemplate.class);
@@ -487,8 +517,9 @@ class InventoryMessagingIntegrationTests {
         var consumer = consumer();
         suppressDeliveryUpdate("NEW.phase = 'COMPLETE'");
         try {
-            new InventoryOrderListener(delivery, validator, reservations, transport).receive(record, acknowledgment, consumer);
+            new InventoryOrderListener(delivery, validator, reservations, transport, metrics).receive(record, acknowledgment, consumer);
         } finally { removeSuppressedDeliveryUpdate(); }
+        assertThat(deliveryCount("dlt")).isEqualTo(completedDlt);
         verify(transport, times(1)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         verify(acknowledgment, never()).acknowledge();
         verify(consumer).pause(java.util.Set.of(new TopicPartition(record.topic(), record.partition())));
@@ -519,6 +550,33 @@ class InventoryMessagingIntegrationTests {
             assertThat(delivery.load(record).phase()).isEqualTo("DLT");
             assertThat(delivery.load(record).dltAttempts()).isEqualTo(4);
         } finally { removeSuppressedDeliveryUpdate(); }
+    }
+
+    /** Topic creation can precede KRaft leader readiness; do not spend business attempt budgets on fixture startup. */
+    private void awaitProducerReadiness() throws Exception {
+        if (producerReady) return;
+        Exception lastFailure = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                kafka.send("warexis.inventory.tests.readiness", new byte[0], new byte[0]).get(5, TimeUnit.SECONDS);
+                producerReady = true;
+                return;
+            } catch (java.util.concurrent.ExecutionException exception) {
+                if (!(exception.getCause() instanceof org.apache.kafka.common.errors.RetriableException)) throw exception;
+                lastFailure = exception;
+            } catch (java.util.concurrent.TimeoutException exception) {
+                lastFailure = exception;
+            }
+        }
+        throw new IllegalStateException("Disposable Kafka producer did not become ready.", lastFailure);
+    }
+
+    private double deliveryCount(String result) {
+        return meters.get("warexis.messaging.deliveries").tag("result", result).counter().count();
+    }
+
+    private double publicationCount(String result) {
+        return meters.get("warexis.outbox.publications").tag("result", result).counter().count();
     }
 
     private void suppressDeliveryUpdate(String predicate) {

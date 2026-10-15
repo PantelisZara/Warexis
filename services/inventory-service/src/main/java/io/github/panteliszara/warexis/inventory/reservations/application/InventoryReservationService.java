@@ -30,18 +30,25 @@ public class InventoryReservationService {
         this.outbox = outbox;
     }
 
+    public record ProcessingOutcome(InventoryReservation reservation, boolean duplicate) {}
+
     @Transactional
     public InventoryReservation process(OrderPlaced input) {
+        return processWithOutcome(input).reservation();
+    }
+
+    @Transactional
+    public ProcessingOutcome processWithOutcome(OrderPlaced input) {
         reservations.lockInput(input.eventId(), input.orderId());
         var processed = reservations.findByEventId(input.eventId());
         if (processed.isPresent()) {
-            return equivalent(processed.get(), input);
+            return new ProcessingOutcome(equivalent(processed.get(), input), true);
         }
         var existing = reservations.findByOrderId(input.orderId());
         if (existing.isPresent()) {
             var decision = equivalent(existing.get(), input);
             reservations.markProcessed(input.eventId(), decision);
-            return decision;
+            return new ProcessingOutcome(decision, true);
         }
 
         // ASCII SKU ordering matches PostgreSQL C collation; repeated demand cannot overflow int.
@@ -70,7 +77,7 @@ public class InventoryReservationService {
         reservations.save(reservation);
         reservations.markProcessed(input.eventId(), reservation);
         outbox.append(reservation);
-        return reservation;
+        return new ProcessingOutcome(reservation, false);
     }
 
     private InventoryReservation equivalent(InventoryReservation existing, OrderPlaced input) {

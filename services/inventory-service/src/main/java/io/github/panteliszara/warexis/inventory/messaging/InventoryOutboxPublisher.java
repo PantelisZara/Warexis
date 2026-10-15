@@ -1,5 +1,8 @@
 package io.github.panteliszara.warexis.inventory.messaging;
 
+import io.github.panteliszara.warexis.inventory.observability.InventoryMetrics;
+import org.springframework.beans.factory.annotation.Autowired;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -26,9 +29,18 @@ public class InventoryOutboxPublisher {
     private final KafkaTemplate<byte[], byte[]> kafka;
     private final MessagingProperties properties;
     private final WorkflowEventValidator validator;
+    private final InventoryMetrics metrics;
 
     public InventoryOutboxPublisher(DataSource dataSource, KafkaTemplate<byte[], byte[]> kafka,
                                     MessagingProperties properties, WorkflowEventValidator validator) {
+        this(dataSource, kafka, properties, validator, InventoryMetrics.disabled());
+    }
+
+    @Autowired
+    public InventoryOutboxPublisher(DataSource dataSource, KafkaTemplate<byte[], byte[]> kafka,
+                                    MessagingProperties properties, WorkflowEventValidator validator,
+                                    InventoryMetrics metrics) {
+        this.metrics = metrics;
         this.dataSource = dataSource;
         this.kafka = kafka;
         this.properties = properties;
@@ -84,18 +96,26 @@ public class InventoryOutboxPublisher {
                 log.info("Inventory relay eventId={} eventType={} orderId={} aggregateId={} attempt={} state=SEND",
                         id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class),
                         row.getObject("aggregate_id", java.util.UUID.class), attempts + 1);
+                if (attempts > 0) metrics.outboxRetry();
                 try { kafka.send("warexis.inventory.events.v1", key, value).get(11, TimeUnit.SECONDS); }
                 catch (Exception exception) {
+                    metrics.publication(false);
                     log.warn("Inventory relay eventId={} eventType={} orderId={} attempt={} state=RETRY classification=BROKER_UNAVAILABLE",
                             id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class), attempts + 1);
                     if (exception instanceof InterruptedException) Thread.currentThread().interrupt();
                     if (attempts + 1 >= 5) pause(connection, "RETRY_EXHAUSTED");
                     return;
                 }
-                try (var update = connection.prepareStatement("UPDATE outbox_events SET published_at = GREATEST(CURRENT_TIMESTAMP, occurred_at), next_attempt_at = NULL WHERE event_id = ?")) {
-                    update.setObject(1, id);
-                    if (update.executeUpdate() != 1) throw new SQLException("Publication metadata unavailable.");
+                try {
+                    try (var update = connection.prepareStatement("UPDATE outbox_events SET published_at = GREATEST(CURRENT_TIMESTAMP, occurred_at), next_attempt_at = NULL WHERE event_id = ?")) {
+                        update.setObject(1, id);
+                        if (update.executeUpdate() != 1) throw new SQLException("Publication metadata unavailable.");
+                    }
+                } catch (SQLException exception) {
+                    metrics.publication(false);
+                    throw exception;
                 }
+                metrics.publication(true);
                 log.info("Inventory relay eventId={} eventType={} orderId={} attempt={} state=PUBLISHED",
                         id, row.getString("event_type"), row.getObject("correlation_id", java.util.UUID.class), attempts + 1);
             }

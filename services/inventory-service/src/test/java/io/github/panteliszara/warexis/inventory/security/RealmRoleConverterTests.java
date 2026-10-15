@@ -13,10 +13,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RealmRoleConverterTests {
     @Test
     void mapsOnlyExactRealmBusinessRolesWithoutDuplicates() {
-        var jwt = jwt(Map.of("roles", Arrays.asList("WAREXIS_OPERATOR", "WAREXIS_VIEWER", "WAREXIS_OPERATOR", 42, null,
+        var jwt = jwt(Map.of("roles", Arrays.asList("WAREXIS_OPERATOR", "WAREXIS_VIEWER", "WAREXIS_OPERATOR", "WAREXIS_METRICS", 42, null,
                 "ROLE_WAREXIS_OPERATOR", "WAREXIS_OPERATOR ", "warexis_viewer")));
         assertThat(new RealmRoleConverter().convert(jwt)).extracting("authority")
-                .containsExactly("ROLE_WAREXIS_OPERATOR", "ROLE_WAREXIS_VIEWER");
+                .containsExactly("ROLE_WAREXIS_OPERATOR", "ROLE_WAREXIS_VIEWER", "ROLE_WAREXIS_METRICS");
     }
 
     @Test

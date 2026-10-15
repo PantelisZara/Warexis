@@ -16,7 +16,7 @@ final class RealmRoleConverter implements Converter<Jwt, Collection<GrantedAutho
             return List.of();
         }
         return roles.stream().filter(String.class::isInstance).map(String.class::cast)
-                .filter(role -> role.equals("WAREXIS_VIEWER") || role.equals("WAREXIS_OPERATOR"))
+                .filter(role -> role.equals("WAREXIS_VIEWER") || role.equals("WAREXIS_OPERATOR") || role.equals("WAREXIS_METRICS"))
                 .distinct().<GrantedAuthority>map(role -> new SimpleGrantedAuthority("ROLE_" + role)).toList();
     }
 }
