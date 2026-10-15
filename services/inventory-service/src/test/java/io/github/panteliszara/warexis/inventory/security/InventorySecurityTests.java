@@ -43,6 +43,24 @@ class InventorySecurityTests {
     }
 
     @Test
+    void metricsRequireDedicatedRoleWhichCannotAccessBusinessRoutes() throws Exception {
+        var metrics = "Bearer " + TestJwtConfiguration.token(claims -> claims.claim("realm_access", Map.of("roles", List.of("WAREXIS_METRICS"))));
+        assertProblem(request("GET", "/actuator/prometheus", null, null), 401);
+        assertProblem(request("GET", "/actuator/prometheus", "Bearer " + TestJwtConfiguration.operatorToken(), null), 403);
+        var viewer = "Bearer " + TestJwtConfiguration.token(claims -> claims.claim("realm_access", Map.of("roles", List.of("WAREXIS_VIEWER"))));
+        assertProblem(request("GET", "/actuator/prometheus", viewer, null), 403);
+        var response = request("GET", "/actuator/prometheus", metrics, null);
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("warexis_messaging_deliveries_total", "service=\"inventory\"",
+                "http_server_requests_seconds_bucket", "jvm_memory_used_bytes", "process_cpu_usage", "hikaricp_connections");
+        assertThat(response.body()).doesNotContain("disk_free_bytes", "disk_total_bytes", "path=\"",
+                System.getProperty("user.dir"), System.getProperty("user.home"));
+        assertProblem(request("GET", "/api/stock-items/MISSING", metrics, null), 403);
+        assertProblem(request("POST", "/api/stock-items", metrics, "{}"), 403);
+        assertProblem(request("GET", "/actuator/env", metrics, null), 403);
+    }
+
+    @Test
     void missingAndBasicCredentialsAreUnauthenticated() throws Exception {
         assertProblem(request("GET", "/api/stock-items/MISSING", null, null), 401);
         assertProblem(request("GET", "/api/stock-items/MISSING", "Basic dGVzdDp0ZXN0", null), 401);

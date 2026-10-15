@@ -193,3 +193,50 @@ reported as unavailable, with source coordinates identifying the record. Raw
 keys, payloads and exception messages are not logged. The outbox partial
 `(occurred_at, event_id)` unpublished index matches its head polling order;
 no additional index or scaling mechanism is introduced.
+
+## Operational metrics
+
+`GET /actuator/prometheus` requires a signed, valid API JWT with the exact realm
+role `WAREXIS_METRICS`. Viewer/operator roles alone cannot scrape it, and the
+metrics role alone cannot use business routes. Only `health` and `prometheus` are
+exposed; health remains anonymous without details. Bind development ports to
+loopback and provide collector credentials outside the repository.
+
+Boot supplies JVM, process, HTTP request latency histograms and Hikari meters.
+The fixed `service="inventory"` tag identifies this service. Custom counters use
+only bounded `result`/`stage` labels; no business identifier or exception text is a
+metric label. They describe process-local observations and reset on restart:
+
+- `warexis_outbox_publications_total{result="published|failed"}` records actual
+  sends. Published requires broker acknowledgment and durable publication
+  metadata; an acknowledged send whose metadata update fails records failed.
+- `warexis_outbox_retries_total` records sends whose durable prior attempt count
+  was positive, excluding waiting, paused and idle polls.
+- `warexis_messaging_deliveries_total{result="processed|duplicate|ignored|dlt"}`
+  records a durably completed delivery after successful source acknowledgment.
+  Duplicate includes equivalent business replays and already-complete source
+  deliveries; ignored means a validated event to which Inventory does not
+  subscribe. A business rejection is processed successfully. A committed business
+  effect followed by failed completion/acknowledgment is not counted processed.
+- `warexis_messaging_failures_total{stage="process|dlt"}` records actual failed
+  processing/send attempts, including malformed contract parsing and failed
+  durable DLT completion after broker acknowledgment. Diagnostic validation does
+  not increment it. `warexis_messaging_retries_total{stage="process|dlt"}` counts
+  actual attempts with a positive durable prior attempt count.
+- `warexis_messaging_pauses_total` records successful listener pause requests.
+  Assignment/rebalance restoration pauses are excluded. These are listener
+  actions, not unique partitions or the current durable paused-partition count.
+
+The outbox sampler uses a dedicated daemon thread, independent of business
+scheduling and scrape threads, at a 15-second fixed delay. One SQL snapshot reads
+at most the first 10,001 unpublished rows through the existing partial ordered
+index, with a two-second SQL execution timeout. Connection acquisition is subject
+to the configured datasource timeout and never blocks a scrape or business
+scheduler. `warexis_outbox_pending` is capped at 10,001 (meaning at least that
+many). `warexis_outbox_oldest_age_seconds` uses database time, excludes published
+rows and clamps future timestamps to zero. Empty queues report zero. Query
+failure or a snapshot at least 30 seconds old reports NaN for both data gauges and
+zero for `warexis_outbox_snapshot_available`; healthy samples report availability
+one. Age is a sampled value, not continuously extrapolated. Unavailable data must
+not be rendered as a healthy zero. Disabling meters does not change delivery,
+transaction, retry, acknowledgment or idempotency behavior.

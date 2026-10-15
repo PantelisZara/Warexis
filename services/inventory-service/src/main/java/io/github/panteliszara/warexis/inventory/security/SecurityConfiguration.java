@@ -55,6 +55,7 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(requests -> requests
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/actuator/prometheus").hasRole("WAREXIS_METRICS")
                         .requestMatchers(HttpMethod.GET, "/api/stock-items/{sku}")
                             .hasAnyRole("WAREXIS_VIEWER", "WAREXIS_OPERATOR")
                         .requestMatchers(HttpMethod.POST, "/api/stock-items").hasRole("WAREXIS_OPERATOR")

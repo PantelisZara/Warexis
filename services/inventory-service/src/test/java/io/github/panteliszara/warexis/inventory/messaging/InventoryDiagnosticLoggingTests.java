@@ -47,13 +47,13 @@ class InventoryDiagnosticLoggingTests {
         when(store.beginAttempt(any(), any(), anyBoolean())).thenReturn(true);
         when(store.transition(any(), any(), any())).thenReturn(true);
         var business = mock(InventoryReservationService.class);
-        when(business.process(any())).thenThrow(new IllegalStateException(unsafe));
+        when(business.processWithOutcome(any())).thenThrow(new IllegalStateException(unsafe));
         KafkaTemplate<byte[], byte[]> kafka = mock(KafkaTemplate.class);
         when(kafka.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(null));
         var ack = mock(Acknowledgment.class);
         new InventoryOrderListener(store, new WorkflowEventValidator(mapper), business, kafka)
                 .receive(record, ack, mock(Consumer.class));
-        verify(business, times(1)).process(any());
+        verify(business, times(1)).processWithOutcome(any());
         verify(ack).acknowledge();
         assertThat(output.getOut()).contains("eventId=" + eventId, "eventType=OrderPlaced", "orderId=" + orderId,
                 "partition=1", "offset=73", "processingAttempt=4", "state=PROCESS_RETRY", "state=DLT",
