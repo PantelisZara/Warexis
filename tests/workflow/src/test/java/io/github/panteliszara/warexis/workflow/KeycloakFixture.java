@@ -65,6 +65,7 @@ final class KeycloakFixture implements AutoCloseable {
         var admin = grant("master", "workflow-bootstrap", adminSecret).value();
         provision(admin, "operator", "WAREXIS_OPERATOR", true, false, List.of());
         provision(admin, "viewer", "WAREXIS_VIEWER", true, false, List.of());
+        provision(admin, "metrics", "WAREXIS_METRICS", true, false, List.of());
         provision(admin, "wrong-audience", "WAREXIS_OPERATOR", false, false, List.of(Map.of(
                 "name", "other-audience", "protocol", "openid-connect", "protocolMapper", "oidc-audience-mapper",
                 "config", Map.of("included.custom.audience", "unrelated-api", "access.token.claim", "true", "id.token.claim", "false"))));

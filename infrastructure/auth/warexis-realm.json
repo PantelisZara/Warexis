@@ -20,6 +20,10 @@
             "WAREXIS_VIEWER"
           ]
         }
+      },
+      {
+        "name": "WAREXIS_METRICS",
+        "description": "Read service Prometheus metrics only; no business permissions"
       }
     ]
   },

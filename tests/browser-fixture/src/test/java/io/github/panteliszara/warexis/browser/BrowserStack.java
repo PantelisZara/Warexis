@@ -38,6 +38,7 @@ final class BrowserStack implements AutoCloseable {
     private final List<AutoCloseable> resources = new ArrayList<>();
     private final List<Process> processes = new ArrayList<>();
     private String base;
+    private Path collectorSecretPath;
     private final RuntimePublication runtimePublication;
 
     BrowserStack(FixtureConfig config) {
@@ -75,6 +76,7 @@ final class BrowserStack implements AutoCloseable {
         String admin = bootstrap(bootstrapSecret);
         var users = Map.of("viewer", user(admin, "viewer", "WAREXIS_VIEWER"),
                 "operator", user(admin, "operator", "WAREXIS_OPERATOR"));
+        var monitoring = monitoringClient(admin);
         var bootstrap = request("GET", base + "/admin/realms/master/clients?clientId=browser-bootstrap", null, admin, 200);
         request("DELETE", base + "/admin/realms/master/clients/" + bootstrap.get(0).path("id").asString(), null, admin, 204);
         // No test seeding client or SPA password grant: business writes happen through the operator browser flow.
@@ -112,7 +114,7 @@ final class BrowserStack implements AutoCloseable {
                 "WAREXIS_FULFILLMENT_PROXY_TARGET", services.get("fulfillment"));
         runtimePublication.publish(JSON.writeValueAsString(Map.of("status", "READY", "issuer", issuer(),
                 "browserOrigin", "http://127.0.0.1:5173", "services", services, "users", users,
-                "frontendEnvironment", env, "stopFile", stopFile().toString())));
+                "frontendEnvironment", env, "monitoring", monitoring, "stopFile", stopFile().toString())));
         System.out.println("Disposable browser stack READY. Browser origin: http://127.0.0.1:5173");
         System.out.println("Identity URL: " + base);
         services.forEach((name, url) -> System.out.println(name + " URL: " + url));
@@ -120,6 +122,29 @@ final class BrowserStack implements AutoCloseable {
 
     Path stopFile() { return config.runtime().resolveSibling(config.runtime().getFileName() + ".stop"); }
     String issuer() { return base + "/realms/warexis"; }
+
+    private Map<String, String> monitoringClient(String admin) throws Exception {
+        String clientId = "warexis-metrics-collector";
+        String secret = UUID.randomUUID().toString();
+        request("POST", base + "/admin/realms/warexis/clients", Map.ofEntries(
+                Map.entry("clientId", clientId), Map.entry("protocol", "openid-connect"),
+                Map.entry("publicClient", false), Map.entry("secret", secret),
+                Map.entry("serviceAccountsEnabled", true), Map.entry("standardFlowEnabled", false),
+                Map.entry("implicitFlowEnabled", false), Map.entry("directAccessGrantsEnabled", false),
+                Map.entry("fullScopeAllowed", false), Map.entry("defaultClientScopes", List.of("roles", "warexis-api")),
+                Map.entry("optionalClientScopes", List.of())), admin, 201);
+        var clients = request("GET", base + "/admin/realms/warexis/clients?clientId=" + clientId, null, admin, 200);
+        String id = clients.get(0).path("id").asString();
+        var role = JSON.readValue(request("GET", base + "/admin/realms/warexis/roles/WAREXIS_METRICS", null, admin, 200).toString(), Map.class);
+        var account = request("GET", base + "/admin/realms/warexis/clients/" + id + "/service-account-user", null, admin, 200);
+        request("POST", base + "/admin/realms/warexis/users/" + account.path("id").asString() + "/role-mappings/realm", List.of(role), admin, 204);
+        request("POST", base + "/admin/realms/warexis/clients/" + id + "/scope-mappings/realm", List.of(role), admin, 204);
+        var secretPath = config.runtime().getParent().resolve("collector.secret");
+        Files.createFile(secretPath, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        collectorSecretPath = secretPath; // Cleanup owns only the file successfully created by this fixture.
+        Files.writeString(secretPath, secret);
+        return Map.of("issuer", issuer(), "collectorClientId", clientId, "collectorSecretFile", collectorSecretPath.toString());
+    }
 
     private Map<String, String> user(String admin, String kind, String role) throws Exception {
         String username = kind + "-" + UUID.randomUUID();
@@ -209,6 +234,7 @@ final class BrowserStack implements AutoCloseable {
         }
         try { network.close(); } catch (Exception failure) { failures.add(failure); }
         try { runtimePublication.close(); } catch (Exception failure) { failures.add(failure); }
+        try { if (collectorSecretPath != null) Files.deleteIfExists(collectorSecretPath); } catch (Exception failure) { failures.add(failure); }
         if (!failures.isEmpty()) throw new IllegalStateException("Disposable fixture cleanup failed for " + failures.size() + " owned resources");
     }
 }
