@@ -1,0 +1,499 @@
+{
+  "uid": "warexis-messaging",
+  "title": "Warexis Kafka and outbox",
+  "description": "All rates use a five-minute window; newly started or idle series may have insufficient samples. Missing/NaN data is unknown, never healthy zero. Counters are process-local observations and reset on restart. These application observations do not claim broker consumer lag or exactly-once totals.",
+  "tags": [
+    "warexis",
+    "provisioned"
+  ],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "warexis"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "title": "Warexis dashboards"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warexis-prometheus"
+        },
+        "query": "label_values(up{job=~\"warexis-.*\"}, service)",
+        "definition": "label_values(up{job=~\"warexis-.*\"}, service)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Outbox snapshot available (1 yes / 0 unavailable)",
+      "type": "timeseries",
+      "description": "Unavailable or stale snapshots must not be interpreted as empty backlog.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "warexis_outbox_snapshot_available{service=~\"$service\"}",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Oldest unpublished outbox age",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "warexis_outbox_oldest_age_seconds{service=~\"$service\"}",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Pending outbox events (capped)",
+      "type": "timeseries",
+      "description": "Bounded count;10001 means at least10001 rows.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "warexis_outbox_pending{service=~\"$service\"}",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Outbox publications observed over 5 minutes",
+      "type": "timeseries",
+      "description": "Published requires broker ACK and durable publication metadata. Failed counts actual attempts including metadata failures.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service,result) (increase(warexis_outbox_publications_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Outbox retry attempts over 5 minutes",
+      "type": "timeseries",
+      "description": "Actual sends with prior durable failed attempts; no waiting polls.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (increase(warexis_outbox_retries_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Kafka delivery outcomes over 5 minutes",
+      "type": "timeseries",
+      "description": "Processed, duplicate, ignored or DLT completion observations. DLT requires acknowledged publication and durable completion.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service,result) (increase(warexis_messaging_deliveries_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Kafka failed attempts over 5 minutes",
+      "type": "timeseries",
+      "description": "Actual processing or DLT publication failures; never pause/wait polls.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service,stage) (increase(warexis_messaging_failures_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Kafka retry attempts over 5 minutes",
+      "type": "timeseries",
+      "description": "Actual attempts after durable prior failures. Process and DLT stages have distinct budgets.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service,stage) (increase(warexis_messaging_retries_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Kafka listener pause requests over 5 minutes",
+      "type": "timeseries",
+      "description": "Listener pause requests only; excludes rebalance restoration. Process-local counter resets on restart; may repeat on replay and is not the current number of durably paused partitions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warexis-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (increase(warexis_messaging_pauses_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}} {{result}} {{stage}} {{pool}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}
