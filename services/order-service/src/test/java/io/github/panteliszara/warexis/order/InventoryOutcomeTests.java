@@ -37,14 +37,14 @@ class InventoryOutcomeTests {
     void commitsConfirmedDecisionAndBothMessageAndBusinessIdempotency() {
         var order = create();
         var result = result(order, "InventoryReserved", null);
-        outcomes.apply(result);
+        assertThat(outcomes.apply(result)).isTrue();
         var confirmation = confirmation(order);
         var terminal = orders.get(order.id());
         assertThat(terminal.status()).isEqualTo(OrderStatus.CONFIRMED);
-        outcomes.apply(result);
+        assertThat(outcomes.apply(result)).isFalse();
         var alias = new InventoryOutcome(UUID.randomUUID(),result.eventType(),result.occurredAt(),result.aggregateId(),
                 result.correlationId(),result.causationId(),result.orderId(),result.reservationId(),result.lines(),result.reasonCode());
-        outcomes.apply(alias);
+        assertThat(outcomes.apply(alias)).isFalse();
         assertThat(orders.get(order.id())).isEqualTo(terminal);
         assertThat(confirmation(order)).isEqualTo(confirmation);
         assertThat(confirmation.path("eventType").asString()).isEqualTo("OrderConfirmed");

@@ -61,6 +61,7 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(authorize -> authorize
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/actuator/prometheus").hasRole("WAREXIS_METRICS")
                         .requestMatchers(HttpMethod.POST, "/api/orders").hasRole("WAREXIS_OPERATOR")
                         .requestMatchers(HttpMethod.GET, "/api/orders/{id}")
                             .hasAnyRole("WAREXIS_VIEWER", "WAREXIS_OPERATOR")
@@ -92,7 +93,8 @@ public class SecurityConfiguration {
             return List.of();
         }
         return roles.stream()
-                .filter(role -> "WAREXIS_VIEWER".equals(role) || "WAREXIS_OPERATOR".equals(role))
+                .filter(role -> "WAREXIS_VIEWER".equals(role) || "WAREXIS_OPERATOR".equals(role)
+                        || "WAREXIS_METRICS".equals(role))
                 .distinct().map(role -> (GrantedAuthority) new SimpleGrantedAuthority("ROLE_" + role)).toList();
     }
 

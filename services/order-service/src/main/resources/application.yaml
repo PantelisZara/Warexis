@@ -31,7 +31,15 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       show-details: never
+  metrics:
+    enable:
+      disk: false
+    tags:
+      service: order
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
