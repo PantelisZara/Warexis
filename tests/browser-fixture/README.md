@@ -43,3 +43,13 @@ Use the official in-app Browser plugin for exploratory QA. Separately, the expli
 8. Verify refresh/session expiry recovery, failed-refresh authentication clearing, `401` behavior, logout and return navigation. Inspect browser storage for absence of tokens. Verify responsive keyboard use and accessible form/error behavior through the same real SPA.
 
 Service paths above are the eight existing backend route shapes. The SPA uses its Vite same-origin service prefixes; no backend CORS change or fake API is required. Record actual observed statuses, UUIDs and UI behavior without including credentials or JWTs in evidence.
+
+### Monitoring acceptance inputs
+
+The private runtime also contains a `monitoring` object with `issuer`,
+`collectorClientId` and `collectorSecretFile`. The disposable fixture provisions a
+metrics-only client before removing its bootstrap administrator. Its random secret
+is saved in an exclusively created mode-0600 file beside the runtime and removed
+when this fixture closes. The object and secret are test-local material; never
+commit either. The client cannot operate business APIs. Existing browser users,
+PKCE authentication and business writes remain unchanged.

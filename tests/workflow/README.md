@@ -113,3 +113,16 @@ The verifier owns and cleans up its separate identity/business resources. It doe
 not use/reset the persistent local Compose identity or business data. Hosted CI
 defines three service verification jobs and this complete packaged gate with a
 45-minute timeout; no remote identity credentials or secrets are required.
+
+## Operational metrics regression
+
+The packaged security matrix additionally checks anonymous scrape rejection,
+viewer/operator scrape denial, metrics-only scrape access, and metrics-only denial
+on real business reads and mutations. A final real workload observes durable Order
+publication, duplicate Inventory delivery without another reservation, and an
+acknowledged Fulfillment DLT outcome. The existing exhausted-DLT scenarios also
+assert the observed failed-send and retry counters before restarting the service.
+Metric privacy checks reject business identifiers and credential material in the
+scrapes. These checks use the packaged services and signed disposable Keycloak
+JWTs; they do not require Prometheus or Grafana. Dashboard acceptance is a separate
+real monitoring-stack gate.

@@ -16,7 +16,7 @@ retains the framework's 60-second clock skew.
 
 ## Authorization matrix
 
-Only the exact `WAREXIS_VIEWER` and `WAREXIS_OPERATOR` strings in
+Only the exact `WAREXIS_VIEWER`, `WAREXIS_OPERATOR` and `WAREXIS_METRICS` strings in
 `realm_access.roles` become Warexis authorities. OAuth scopes, client roles,
 lookalike names and malformed role claims grant no Warexis authority. OPERATOR
 is a Keycloak composite including VIEWER; services also explicitly allow either
@@ -26,6 +26,7 @@ per-user ownership filtering is not implemented.
 | Service | Method | Route | Access |
 | --- | --- | --- | --- |
 | All three | GET | `/actuator/health` | Anonymous, without components or details |
+| All three | GET | `/actuator/prometheus` | `WAREXIS_METRICS` only; viewer/operator alone denied |
 | Order | POST | `/api/orders` | OPERATOR |
 | Order | GET | `/api/orders/{id}` | VIEWER or OPERATOR |
 | Inventory | POST | `/api/stock-items` | OPERATOR |
@@ -97,3 +98,19 @@ The full run adds all 47 preserved distributed-system cases with authenticated
 external HTTP commands. The internal three-service chain and every original
 DLT, restart, retry, offset and idempotency assertion remain in place.
 Local verification does not establish hosted CI success or production readiness.
+
+## Local metrics collector
+
+The metrics role grants only the Prometheus scrape route. It grants no business
+read or mutation permissions and is not assigned to the browser client. The same
+signature, issuer, audience and expiration checks apply to collector access tokens.
+All other Actuator routes remain denied; health continues to disclose only status.
+
+For an existing development realm, `infrastructure/auth/configure-metrics-client.py`
+creates a new `warexis-metrics-collector` service account with only the metrics role
+in its explicit role scope. It prompts for the existing local administrative client
+secret and writes a new collector secret exclusively to a private external file.
+It refuses to overwrite either an existing collector or a secret file. This is a
+local HTTP development tool, not a production credential distribution mechanism.
+Prometheus refreshes signed access tokens with OAuth2 client credentials; tokens and
+client secrets must never be copied into Git or browser configuration.

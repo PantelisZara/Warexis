@@ -162,7 +162,7 @@ class KafkaWorkflowTests {
             securityResponse(requestWithAuthorization(port, path, "GET", null, "Basic dXNlcjpwYXNz"), 401);
             for (var client : List.of("wrong-audience", "missing-audience", "foreign"))
                 securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client)), 401);
-            for (var client : List.of("scope-only", "client-role-only", "lookalike"))
+            for (var client : List.of("scope-only", "client-role-only", "lookalike", "metrics"))
                 securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client)), 403);
             for (var client : List.of("viewer", "operator")) {
                 var response = requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token(client));
@@ -179,6 +179,7 @@ class KafkaWorkflowTests {
         for (var mutation : mutations) {
             securityResponse(requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), null), 401);
             securityResponse(requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), "Bearer " + IDENTITY.token("viewer")), 403);
+            securityResponse(requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), "Bearer " + IDENTITY.token("metrics")), 403);
             var response = requestWithAuthorization(port, mutation.path(), mutation.method(), mutation.body(), "Bearer " + IDENTITY.token("operator"));
             assertThat(response.statusCode()).isEqualTo(mutation.expected());
             assertThat(response.headers().firstValue("Set-Cookie")).isEmpty();
@@ -189,6 +190,14 @@ class KafkaWorkflowTests {
         assertThat(health.has("components") || health.has("details")).as("anonymous health has no sensitive details").isFalse();
         for (var path : List.of("/actuator/env", "/actuator", "/error", "/login", "/logout", "/api/unclassified"))
             securityResponse(requestWithAuthorization(port, path, "GET", null, "Bearer " + IDENTITY.token("operator")), 403);
+        securityResponse(requestWithAuthorization(port, "/actuator/prometheus", "GET", null, null), 401);
+        for (var client : List.of("viewer", "operator"))
+            securityResponse(requestWithAuthorization(port, "/actuator/prometheus", "GET", null, "Bearer " + IDENTITY.token(client)), 403);
+        var scrape = metrics(port);
+        assertThat(scrape).contains("jvm_memory_used_bytes", "http_server_requests_seconds", "warexis_outbox_pending",
+                "warexis_messaging_deliveries_total", "service=\"" + service + "\"");
+        assertThat(scrape).doesNotContain(IDENTITY.token("metrics"), IDENTITY.token("operator"), order.toString(), sku,
+                "eventId=", "orderId=", "reservationId=", "username=", "email=", "exceptionMessage=");
         var duplicate = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + reads.get(0)))
                 .header("Authorization", "Bearer " + IDENTITY.token("operator"))
                 .header("Authorization", "Bearer " + IDENTITY.token("viewer")).GET().build();
@@ -473,6 +482,9 @@ class KafkaWorkflowTests {
         Source blocked = null;
         try {
             topicLimit(resource, "1024");
+            int metricPort = service.equals("order") ? orderPort : service.equals("inventory") ? inventoryPort : fulfillmentPort;
+            double failedBefore = metricValue(metrics(metricPort), "warexis_messaging_failures_total", "stage=\"dlt\"");
+            double retriesBefore = metricValue(metrics(metricPort), "warexis_messaging_retries_total", "stage=\"dlt\"");
             blocked = Source.of(send(sourceTopic(service), key.toString(), poison));
             var source = blocked;
             assertThat(source.partition()).isEqualTo(blockedPartition);
@@ -480,6 +492,10 @@ class KafkaWorkflowTests {
             assertThat(deliveryAttempts(service, source, true)).isEqualTo(4);
             for (int attempt = 1; attempt <= 4; attempt++) diagnostic(service, source, "DLT_RETRY", null, attempt);
             diagnostic(service, source, "PAUSED", null, 4);
+            assertThat(metricValue(metrics(metricPort), "warexis_messaging_failures_total", "stage=\"dlt\""))
+                    .as("four actual failed DLT sends measured").isGreaterThanOrEqualTo(failedBefore + 4);
+            assertThat(metricValue(metrics(metricPort), "warexis_messaging_retries_total", "stage=\"dlt\""))
+                    .as("three retries after the initial DLT attempt measured").isGreaterThanOrEqualTo(retriesBefore + 3);
             assertUncommitted(source, group(service));
             for (int i = 0; i < 96 && (samePartition.size() < 3 || otherPartition.isEmpty()); i++) {
                 var id = createOrder(List.of(line(sku, 1)));
@@ -763,6 +779,45 @@ class KafkaWorkflowTests {
         assertThat(ship(id, reference).statusCode()).isEqualTo(200);
         assertThat(fulfillment(order).path("status").asString()).isEqualTo("SHIPPED");
         assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", id)).isEqualTo(1);
+    }
+
+    @Test @Order(22)
+    void realWorkloadChangesOperationalCountersWithoutChangingIdempotency() throws Exception {
+        double publishedBefore = metricValue(metrics(orderPort), "warexis_outbox_publications_total", "result=\"published\"");
+        var id = createOrder(List.of(line(stock(8), 2)));
+        terminal(id, "CONFIRMED");
+        var pending = fulfillment(id);
+        assertThat(ship(UUID.fromString(pending.path("id").asString()), "OBS-" + UUID.randomUUID()).statusCode()).isEqualTo(200);
+        await(() -> metricValue(metrics(orderPort), "warexis_outbox_publications_total", "result=\"published\"") >= publishedBefore + 2,
+                "actual durable Order publications measured");
+        double duplicateBefore = metricValue(metrics(inventoryPort), "warexis_messaging_deliveries_total", "result=\"duplicate\"");
+        var placed = event(ORDER_DB, id, "aggregate_id", "OrderPlaced");
+        var source = send(ORDER_TOPIC, id.toString(), placed);
+        committed(source, INVENTORY_GROUP);
+        await(() -> metricValue(metrics(inventoryPort), "warexis_messaging_deliveries_total", "result=\"duplicate\"") > duplicateBefore,
+                "actual duplicate classified without another reservation");
+        assertThat(count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations WHERE order_id = ?", id)).isEqualTo(1);
+        double dltBefore = metricValue(metrics(fulfillmentPort), "warexis_messaging_deliveries_total", "result=\"dlt\"");
+        source = send(ORDER_TOPIC, id.toString(), "{malformed-observability");
+        committed(source, FULFILLMENT_GROUP);
+        await(() -> metricValue(metrics(fulfillmentPort), "warexis_messaging_deliveries_total", "result=\"dlt\"") > dltBefore,
+                "DLT metric requires actual acknowledged quarantine and durable completion");
+        assertThat(fulfillment(id).path("status").asString()).isEqualTo("SHIPPED");
+        for (int port : List.of(orderPort, inventoryPort, fulfillmentPort)) {
+            String body = metrics(port);
+            MetricPrivacyAssertions.assertSafe(body, id);
+        }
+    }
+
+    private static String metrics(int port) {
+        var response = requestWithAuthorization(port, "/actuator/prometheus", "GET", null, "Bearer " + IDENTITY.token("metrics"));
+        assertThat(response.statusCode()).as("metrics-only signed JWT scrape").isEqualTo(200);
+        return response.body();
+    }
+
+    private static double metricValue(String text, String name, String label) {
+        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
+                .mapToDouble(line -> Double.parseDouble(line.substring(line.indexOf('}') + 1).strip().split("\\s+", 2)[0])).sum();
     }
 
     private static void caughtUp(String group, String topic) throws Exception {

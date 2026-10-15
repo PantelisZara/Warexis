@@ -42,6 +42,24 @@ jobs:
       - name: Verify service
         run: ./mvnw --batch-mode --no-transfer-progress verify
 
+  monitoring-config:
+    name: Verify monitoring configuration and identity boundaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify local identity provisioning contracts
+        run: python3 -m unittest discover -s infrastructure/auth -p 'test_*.py' -v
+      - name: Verify private monitoring runtime boundaries
+        run: python3 scripts/validate-monitoring-test.py
+      - name: Verify provisioned dashboard queries
+        run: python3 scripts/validate-monitoring.py --promtool
+
   workflow:
     name: Verify Keycloak security and authenticated Kafka workflow
     runs-on: ubuntu-24.04
