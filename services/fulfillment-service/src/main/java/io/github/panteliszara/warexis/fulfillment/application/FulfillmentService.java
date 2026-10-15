@@ -24,13 +24,13 @@ public class FulfillmentService {
     }
 
     @Transactional
-    public void accept(Confirmation input) {
+    public boolean accept(Confirmation input) {
         // Revalidate internal inputs through the same closed transport contract.
         var canonical = json.writeValueAsString(inputEnvelope(input));
         EventJson.confirmation(input.orderId().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         if (!input.eventType().equals("OrderConfirmed")) {
-            return;
+            return false;
         }
         lock(601,input.eventId().toString());
         lock(602,input.orderId().toString());
@@ -40,7 +40,7 @@ public class FulfillmentService {
             if (!json.readTree(previous.get()).equals(json.readTree(canonical))) {
                 throw new PoisonMessageException();
             }
-            return;
+            return false;
         }
         var owned=jdbc.sql("SELECT id FROM fulfillments WHERE order_id=:order")
                 .param("order",input.orderId()).query(UUID.class).optional();
@@ -76,6 +76,7 @@ public class FulfillmentService {
         }
         requireOne(jdbc.sql("INSERT INTO processed_confirmations VALUES(:event,:id,CAST(:json AS jsonb),CURRENT_TIMESTAMP)")
                 .param("event",input.eventId()).param("id",id).param("json",canonical).update());
+        return owned.isEmpty();
     }
 
     private Map<String, Object> inputEnvelope(Confirmation in) {

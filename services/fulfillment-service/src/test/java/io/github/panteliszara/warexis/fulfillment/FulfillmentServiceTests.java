@@ -30,6 +30,13 @@ class FulfillmentServiceTests {
     static Confirmation input() { return new Confirmation(UUID.randomUUID(),"OrderConfirmed",Instant.parse("2026-10-07T00:00:00Z"),
             UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),List.of(new Confirmation.Line(UUID.randomUUID(),"Abc-1",2),new Confirmation.Line(UUID.randomUUID(),"Abc-1",3))); }
     static Confirmation alias(Confirmation in) { return new Confirmation(UUID.randomUUID(),in.eventType(),in.occurredAt().plusSeconds(1),in.orderId(),in.reservationId(),in.causationId(),in.lines()); }
+    @Test void acceptanceDistinguishesNewPlanFromExactAndMatchingAliasReplays() {
+        var in=input();
+        assertThat(service.accept(in)).isTrue();
+        assertThat(service.accept(in)).isFalse();
+        assertThat(service.accept(alias(in))).isFalse();
+        assertThat(count("fulfillments","order_id",in.orderId())).isEqualTo(1);
+    }
     @Test void migrationsAndOwnedDatabaseValidate() {
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
         assertThat(jdbc.sql("SELECT COUNT(*) FROM flyway_schema_history WHERE success=true").query(Long.class).single()).isEqualTo(1);

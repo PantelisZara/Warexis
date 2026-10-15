@@ -60,6 +60,7 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(rules -> rules
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/actuator/prometheus").hasRole("WAREXIS_METRICS")
                         .requestMatchers(HttpMethod.GET, "/api/fulfillments/{id}", "/api/fulfillments/orders/{orderId}")
                             .hasAnyRole("WAREXIS_VIEWER", "WAREXIS_OPERATOR")
                         .requestMatchers(HttpMethod.POST, "/api/fulfillments/{id}/ship").hasRole("WAREXIS_OPERATOR")
@@ -101,7 +102,7 @@ public class SecurityConfiguration {
             if (!(realm instanceof Map<?, ?> claims) || !(claims.get("roles") instanceof Collection<?> roles)) {
                 return List.of();
             }
-            return roles.stream().filter(role -> "WAREXIS_VIEWER".equals(role) || "WAREXIS_OPERATOR".equals(role))
+            return roles.stream().filter(role -> "WAREXIS_VIEWER".equals(role) || "WAREXIS_OPERATOR".equals(role) || "WAREXIS_METRICS".equals(role))
                     .<org.springframework.security.core.GrantedAuthority>map(role -> new SimpleGrantedAuthority("ROLE_" + role)).distinct().toList();
         });
         return converter;

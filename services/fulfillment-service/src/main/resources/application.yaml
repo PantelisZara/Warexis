@@ -31,10 +31,18 @@ warexis:
     poll-interval: ${WAREXIS_MESSAGING_POLL_INTERVAL:250ms}
 
 management:
+  metrics:
+    enable:
+      disk: false
+    tags:
+      service: fulfillment
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       show-details: never
