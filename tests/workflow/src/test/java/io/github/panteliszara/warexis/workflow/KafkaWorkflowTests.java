@@ -69,6 +69,7 @@ class KafkaWorkflowTests {
     private static final PostgreSQLContainer INVENTORY_DB = new PostgreSQLContainer("postgres:18.6");
     private static final PostgreSQLContainer FULFILLMENT_DB = new PostgreSQLContainer("postgres:18.6");
     private static final KeycloakFixture IDENTITY = new KeycloakFixture();
+    private static final TempoFixture TEMPO = new TempoFixture();
     private static Process fulfillmentProcess;
     private static int fulfillmentPort;
     private static Process orderProcess;
@@ -89,6 +90,7 @@ class KafkaWorkflowTests {
             var target = Path.of("target");
             Files.createDirectories(target);
             for (var service : List.of("order", "inventory", "fulfillment")) Files.writeString(target.resolve(service + ".log"), "");
+            TEMPO.start();
             IDENTITY.start();
             ORDER_DB.start();
             INVENTORY_DB.start();
@@ -136,6 +138,7 @@ class KafkaWorkflowTests {
         cleanup(ORDER_DB::stop, failures);
         cleanup(FULFILLMENT_DB::stop, failures);
         cleanup(IDENTITY::close, failures);
+        cleanup(TEMPO::close, failures);
         if (!failures.isEmpty()) {
             var failure = new AssertionError("Owned workflow resources could not all be cleaned up");
             failures.forEach(failure::addSuppressed);
@@ -339,9 +342,12 @@ class KafkaWorkflowTests {
         docker.pauseContainerCmd(KAFKA.getContainerId()).exec();
         UUID id;
         String original;
+        String originalTrace;
         try {
             id = createOrder(List.of(line(sku, 2)));
             original = event(ORDER_DB, id, "aggregate_id");
+            originalTrace = traceContext(ORDER_DB, id, "OrderPlaced");
+            assertThat(originalTrace).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01");
             await(() -> count(ORDER_DB, "SELECT count(*) FROM messaging_relay_control WHERE id = 1 AND paused", null) == 1, "relay reaches durable bounded pause", Duration.ofSeconds(90));
             assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND published_at IS NULL AND publication_attempts = 5", id)).isEqualTo(1);
         } finally {
@@ -352,7 +358,16 @@ class KafkaWorkflowTests {
         health(orderPort, orderProcess);
         assertThat(count(ORDER_DB, "SELECT count(*) FROM messaging_relay_control WHERE id = 1 AND paused", null)).isEqualTo(1);
         assertThat(event(ORDER_DB, id, "aggregate_id")).isEqualTo(original);
-        assertThat(status(id)).isEqualTo("PENDING_INVENTORY");
+        // A timed-out send may still reach Kafka after recovery. Pausing the relay
+        // prevents new attempts; it does not cancel earlier sends or stop consumers.
+        assertThat(status(id)).isIn("PENDING_INVENTORY", "CONFIRMED");
+        assertThat(traceContext(ORDER_DB, id, "OrderPlaced")).isEqualTo(originalTrace);
+        observeBlocked(() -> {
+            assertThat(count(ORDER_DB, "SELECT count(*) FROM messaging_relay_control WHERE id=1 AND paused", null)).isEqualTo(1);
+            assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id=? AND event_type='OrderPlaced' AND published_at IS NULL AND publication_attempts=5", id)).isEqualTo(1);
+            assertThat(event(ORDER_DB, id, "aggregate_id", "OrderPlaced")).isEqualTo(original);
+        }, "restarted paused relay cannot begin another publication attempt");
+        assertThat(traceContext(ORDER_DB, id, "OrderPlaced")).isEqualTo(originalTrace);
         // Stop the owned service before resetting its disposable database, as operators do.
         stopProcess(orderProcess);
         execute(ORDER_DB, "UPDATE outbox_events SET publication_attempts = 0, next_attempt_at = NULL WHERE published_at IS NULL");
@@ -362,6 +377,10 @@ class KafkaWorkflowTests {
         terminal(id, "CONFIRMED");
         assertReserved(sku, 2);
         assertThat(event(ORDER_DB, id, "aggregate_id")).isEqualTo(original);
+        assertThat(traceContext(ORDER_DB, id, "OrderPlaced")).isEqualTo(originalTrace);
+        await(() -> count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE aggregate_id=? AND event_type='OrderPlaced' AND published_at IS NOT NULL", id) == 1,
+                "explicit recovery durably completes original publication");
+        assertOneDecision(id);
     }
 
     static Stream<String> serviceDirections() { return Stream.of("order", "inventory"); }
@@ -375,11 +394,14 @@ class KafkaWorkflowTests {
         inject(database, "outbox_events", "NEW.publication_attempts > OLD.publication_attempts", false);
         UUID id;
         String original;
+        String originalTrace;
         try {
             id = createOrder(List.of(line(sku, 2)));
             await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service) + " = ? AND event_type = '" + eventType(service) + "'", id) == 1,
                     service + " committed pending outbox");
             original = event(database, id, eventColumn(service));
+            originalTrace = traceContext(database, id, eventType(service));
+            assertThat(originalTrace).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01");
             assertThat(count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service)
                     + " = ? AND event_type = '" + eventType(service) + "' AND published_at IS NULL AND publication_attempts = 0", id)).isEqualTo(1);
             if (service.equals("inventory")) assertReserved(sku, 2);
@@ -390,6 +412,7 @@ class KafkaWorkflowTests {
         await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE " + eventColumn(service)
                 + " = ? AND event_type = '" + eventType(service) + "' AND published_at IS NOT NULL", id) == 1, service + " pending publication resumes");
         assertThat(event(database, id, eventColumn(service))).isEqualTo(original);
+        assertThat(traceContext(database, id, eventType(service))).isEqualTo(originalTrace);
         assertReserved(sku, 2);
         assertOneDecision(id);
     }
@@ -438,22 +461,36 @@ class KafkaWorkflowTests {
         var docker = DockerClientFactory.instance().client();
         UUID id = null;
         Source captured = null;
-        // Capture the healthy business marker before the outage. Kafka offset observations remain independent of JDBC.
-        if (service.equals("order")) {
-            stopProcess(inventoryProcess);
-            id = createOrder(List.of(line(sku, 2)));
-            assertThat(status(id)).isEqualTo("PENDING_INVENTORY");
-            source(ORDER_TOPIC, id); // Broker acceptance is required before disabling the Order database.
-        }
-        docker.pauseContainerCmd(database.getContainerId()).exec();
+        boolean inventoryStopped = false;
+        boolean databasePaused = false;
         try {
+            // Capture the healthy marker before the outage. Keep cleanup around this
+            // prerequisite too: failure to find its source must not leave Inventory down.
+            if (service.equals("order")) {
+                inventoryStopped = true;
+                stopProcess(inventoryProcess);
+                id = createOrder(List.of(line(sku, 2)));
+                assertThat(status(id)).isEqualTo("PENDING_INVENTORY");
+                source(ORDER_TOPIC, id); // Broker acceptance precedes disabling the Order database.
+            }
+            docker.pauseContainerCmd(database.getContainerId()).exec();
+            databasePaused = true;
             if (!service.equals("order")) id = createOrder(List.of(line(sku, 2)));
-            else restartService("inventory");
+            else {
+                restartService("inventory");
+                inventoryStopped = false;
+            }
             captured = sourceForService(service, id);
             var blockedSource = captured;
             observeBlocked(() -> assertUncommitted(blockedSource, group(service)), service + " unavailable database");
             crashService(service);
-        } finally { docker.unpauseContainerCmd(database.getContainerId()).exec(); }
+        } finally {
+            try {
+                if (databasePaused) docker.unpauseContainerCmd(database.getContainerId()).exec();
+            } finally {
+                if (inventoryStopped) restartService("inventory");
+            }
+        }
         restartService(service);
         committed(captured, group(service));
         terminal(id, "CONFIRMED");
@@ -474,6 +511,7 @@ class KafkaWorkflowTests {
         var key = UUID.randomUUID();
         int blockedPartition = partition(key);
         var poison = ("{" + UNSAFE_MARKER + "\n" + "x".repeat(5000)).getBytes(StandardCharsets.UTF_8);
+        String incoming = randomTraceparent();
         var later = new ArrayList<UUID>();
         var laterSources = new java.util.LinkedHashMap<UUID, Source>();
         var samePartition = new ArrayList<UUID>();
@@ -485,11 +523,12 @@ class KafkaWorkflowTests {
             int metricPort = service.equals("order") ? orderPort : service.equals("inventory") ? inventoryPort : fulfillmentPort;
             double failedBefore = metricValue(metrics(metricPort), "warexis_messaging_failures_total", "stage=\"dlt\"");
             double retriesBefore = metricValue(metrics(metricPort), "warexis_messaging_retries_total", "stage=\"dlt\"");
-            blocked = Source.of(send(sourceTopic(service), key.toString(), poison));
+            blocked = Source.of(tracedSend(sourceTopic(service), key.toString(), poison, incoming));
             var source = blocked;
             assertThat(source.partition()).isEqualTo(blockedPartition);
             await(() -> deliveryPhase(service, source).equals("PAUSED"), service + " four failed real DLT sends exhaust durable budget", Duration.ofSeconds(75));
             assertThat(deliveryAttempts(service, source, true)).isEqualTo(4);
+            assertAttemptTrace(incoming, service, "warexis.kafka.dlt", 4, 0, "exhausted-dlt", UNSAFE_MARKER);
             for (int attempt = 1; attempt <= 4; attempt++) diagnostic(service, source, "DLT_RETRY", null, attempt);
             diagnostic(service, source, "PAUSED", null, 4);
             assertThat(metricValue(metrics(metricPort), "warexis_messaging_failures_total", "stage=\"dlt\""))
@@ -535,6 +574,7 @@ class KafkaWorkflowTests {
             assertThat(deliveryPhase(service, source)).isEqualTo("COMPLETE");
             assertThat(deliveryAttempts(service, source, true)).isEqualTo(1);
             assertThat(dltCopies(dlt, source, poison)).isEqualTo(1);
+            assertAttemptTrace(incoming, service, "warexis.kafka.dlt", 4, 1, "recovered-dlt", UNSAFE_MARKER);
             var dltEnd = admin.listOffsets(Map.of(new TopicPartition(dlt, blockedPartition),
                     org.apache.kafka.clients.admin.OffsetSpec.latest())).all().get(10, TimeUnit.SECONDS)
                     .get(new TopicPartition(dlt, blockedPartition)).offset();
@@ -624,6 +664,7 @@ class KafkaWorkflowTests {
     @Test @Order(14)
     void duplicateConfirmationAndMatchingAliasPreserveShippedOriginAcrossRestart() throws Exception {
         var original = fulfillment(sampleOrder);
+        String originalOrigin = confirmationContext(sampleOrder);
         var json = event(ORDER_DB, sampleOrder, "aggregate_id", "OrderConfirmed");
         committed(send(ORDER_TOPIC, sampleOrder.toString(), json), FULFILLMENT_GROUP);
         var alias = (tools.jackson.databind.node.ObjectNode) JSON.readTree(json);
@@ -637,6 +678,7 @@ class KafkaWorkflowTests {
         committed(send(ORDER_TOPIC, sampleOrder.toString(), json), FULFILLMENT_GROUP);
         assertThat(fulfillment(sampleOrder)).isEqualTo(original);
         assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id = ?", sampleOrder)).isEqualTo(1);
+        assertThat(confirmationContext(sampleOrder)).isEqualTo(originalOrigin);
     }
 
     @Test @Order(15)
@@ -676,11 +718,15 @@ class KafkaWorkflowTests {
         // For confirmation, use a fresh order created only after blocking its typed relay attempt.
         inject(database, "outbox_events", "NEW.event_type = '" + type + "' AND NEW.publication_attempts > OLD.publication_attempts", false);
         String original;
+        String originalTrace;
+        String originalOrigin = stage.equals("shipment") ? confirmationContext(order) : null;
         try {
             if (stage.equals("confirmation")) {
                 order = createOrder(List.of(line(sku, 1))); terminal(order, "CONFIRMED"); aggregate = order;
             } else assertThat(ship(aggregate, "RECOVER-" + UUID.randomUUID()).statusCode()).isEqualTo(200);
             original = event(database, aggregate, "aggregate_id", type);
+            originalTrace = traceContext(database, order, type);
+            assertThat(originalTrace).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01");
             assertThat(count(database, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = '" + type + "' AND published_at IS NULL AND publication_attempts = 0", aggregate)).isEqualTo(1);
             crashService(service);
         } finally { removeInjection(database, "outbox_events"); }
@@ -688,6 +734,16 @@ class KafkaWorkflowTests {
         var stableAggregate = aggregate;
         await(() -> count(database, "SELECT count(*) FROM outbox_events WHERE aggregate_id = ? AND event_type = '" + type + "' AND published_at IS NOT NULL", stableAggregate) == 1, "new fact publication recovered");
         assertThat(event(database, aggregate, "aggregate_id", type)).isEqualTo(original);
+        assertThat(traceContext(database, order, type)).isEqualTo(originalTrace);
+        if (stage.equals("shipment")) assertThat(confirmationContext(order)).isEqualTo(originalOrigin);
+        await(() -> {
+            try {
+                var spans = TEMPO.trace(originalTrace.substring(3, 35), "restart-" + stage);
+                TempoFixture.child(spans, service + "-service", "warexis.outbox.publish", originalTrace.substring(36, 52));
+                return true;
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException("Trace query interrupted", interrupted); }
+        }, "actual new-JVM publisher continues durable context", Duration.ofSeconds(30));
         fulfillment(order);
     }
 
@@ -737,7 +793,12 @@ class KafkaWorkflowTests {
         UUID order;
         Source source;
         try {
-            order = createOrder(List.of(line(stock(4), 1))); terminal(order, "CONFIRMED");
+            String incoming = randomTraceparent();
+            var response = tracedRequest(orderPort, "/api/orders", "POST",
+                    JSON.writeValueAsString(Map.of("lines", List.of(line(stock(4), 1)))), incoming);
+            assertThat(response.statusCode()).isEqualTo(201);
+            order = UUID.fromString(JSON.readTree(response.body()).path("id").asString());
+            terminal(order, "CONFIRMED");
             source = source(ORDER_TOPIC, order, "OrderConfirmed");
             committed(source, FULFILLMENT_GROUP);
             assertThat(deliveryPhase("fulfillment", source)).isEqualTo("COMPLETE");
@@ -746,6 +807,22 @@ class KafkaWorkflowTests {
             assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments WHERE order_id = ?", order)).isZero();
             var bytes = event(ORDER_DB, order, "aggregate_id", "OrderConfirmed").getBytes(StandardCharsets.UTF_8);
             assertThat(dltCopies(ORDER_TOPIC + ".fulfillment.dlt", source, bytes)).isEqualTo(1);
+            String origin = traceContext(ORDER_DB, order, "OrderConfirmed");
+            await(() -> {
+                try {
+                    var spans = TEMPO.trace(origin.substring(3, 35), "process-retry",
+                            "synthetic confirmation persistence fault", order.toString());
+                    var failed = spans.stream().filter(x -> x.service().equals("fulfillment-service")
+                            && x.name().equals("warexis.kafka.process")).findFirst().orElseThrow(TempoFixture.IncompleteTrace::new);
+                    var publish = TempoFixture.byId(spans, failed.parent(), "order-service", "warexis.outbox.publish");
+                    assertThat(publish.parent()).isEqualTo(origin.substring(36, 52));
+                    String carrier = "00-" + publish.trace() + "-" + publish.id() + "-01";
+                    assertAttempts(spans, carrier, "fulfillment", "warexis.kafka.process", 4, 0);
+                    assertAttempts(spans, carrier, "fulfillment", "warexis.kafka.dlt", 0, 1);
+                    return true;
+                } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException(interrupted); }
+            }, "four failed PROCESS siblings and acknowledged DLT share original producer", Duration.ofSeconds(30));
         } finally {
             execute(FULFILLMENT_DB, "DROP TRIGGER workflow_insert_fault ON processed_confirmations");
             execute(FULFILLMENT_DB, "DROP FUNCTION workflow_insert_fault()");
@@ -806,6 +883,196 @@ class KafkaWorkflowTests {
         for (int port : List.of(orderPort, inventoryPort, fulfillmentPort)) {
             String body = metrics(port);
             MetricPrivacyAssertions.assertSafe(body, id);
+        }
+    }
+
+    @Test @Order(23)
+    void tracesRealAuthenticatedFlowAndLinksDispatchToImmutableConfirmation() throws Exception {
+        String sku = stock(8), origin = randomTraceparent();
+        var response = tracedRequest(orderPort, "/api/orders?trace_probe=TRACE_PRIVATE_QUERY", "POST",
+                JSON.writeValueAsString(Map.of("lines", List.of(line(sku, 2)))), origin);
+        assertThat(response.statusCode()).isEqualTo(201);
+        UUID order = UUID.fromString(JSON.readTree(response.body()).path("id").asString());
+        terminal(order, "CONFIRMED");
+        var pending = fulfillment(order);
+        String firstOrigin = confirmationContext(order);
+        assertTraceFlow(order, origin.substring(3, 35), sku);
+        String dispatch = randomTraceparent(), reference = "TRACE-" + UUID.randomUUID();
+        response = tracedRequest(fulfillmentPort, "/api/fulfillments/" + pending.path("id").asString() + "/ship", "POST",
+                JSON.writeValueAsString(Map.of("shipmentReference", reference)), dispatch);
+        assertThat(response.statusCode()).isEqualTo(200);
+        await(() -> count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id=? AND published_at IS NOT NULL", order) == 1,
+                "traced shipment broker acknowledged");
+        String shipped = traceContext(FULFILLMENT_DB, order, "FulfillmentShipped");
+        await(() -> {
+            try {
+                var spans = TEMPO.trace(dispatch.substring(3, 35), "dispatch", sku, reference, order.toString(),
+                        "TRACE_PRIVATE_QUERY", IDENTITY.token("operator"));
+                var attempt = spans.stream().filter(x -> x.name().equals("warexis.fulfillment.dispatch")).findFirst().orElseThrow(TempoFixture.IncompleteTrace::new);
+                TempoFixture.descendsFromHttp(spans, attempt);
+                assertThat(attempt.links()).containsExactly(new TempoFixture.Link(firstOrigin.substring(3, 35), firstOrigin.substring(36, 52)));
+                assertThat(attempt.id()).isEqualTo(shipped.substring(36, 52));
+                var publisher = TempoFixture.child(spans, "fulfillment-service", "warexis.outbox.publish", attempt.id());
+                assertThat(publisher.start()).isGreaterThanOrEqualTo(attempt.start());
+                return true;
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException("Trace query interrupted", interrupted); }
+        }, "actual dispatch current HTTP ancestry and immutable confirmation link", Duration.ofSeconds(30));
+        assertThat(confirmationContext(order)).isEqualTo(firstOrigin);
+        assertOneDecision(order);
+    }
+
+    @Test @Order(24)
+    void tempoOutageCannotInterruptCommittedBusinessAndExportsRecover() throws Exception {
+        String sku = stock(8);
+        try {
+            TEMPO.pause();
+            var order = createOrder(List.of(line(sku, 1)));
+            terminal(order, "CONFIRMED");
+            var pending = fulfillment(order);
+            assertThat(ship(UUID.fromString(pending.path("id").asString()), "OUTAGE-" + UUID.randomUUID()).statusCode()).isEqualTo(200);
+            await(() -> count(FULFILLMENT_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id=? AND published_at IS NOT NULL", order) == 1,
+                    "business shipment published while Tempo paused");
+            assertOneDecision(order);
+            assertReserved(sku, 1);
+            assertThat(count(ORDER_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id=? AND published_at IS NOT NULL", order)).isEqualTo(2);
+            assertThat(count(INVENTORY_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id=? AND published_at IS NOT NULL", order)).isEqualTo(1);
+            noUnsafePayloadLogs();
+        } finally { TEMPO.resume(); }
+        String context = randomTraceparent();
+        var response = tracedRequest(orderPort, "/api/orders", "POST",
+                JSON.writeValueAsString(Map.of("lines", List.of(line(sku, 1)))), context);
+        assertThat(response.statusCode()).isEqualTo(201);
+        UUID recovered = UUID.fromString(JSON.readTree(response.body()).path("id").asString());
+        terminal(recovered, "CONFIRMED");
+        fulfillment(recovered);
+        assertTraceFlow(recovered, context.substring(3, 35), sku);
+        assertReserved(sku, 2);
+    }
+
+    @ParameterizedTest(name = "legacy transport context {0}")
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"missing", "malformed", "duplicate", "unsampled"})
+    @Order(25)
+    void legacyAndUntrustedTransportContextNeverChangesFacts(String kind) throws Exception {
+        String sku = stock(4), incoming = randomTraceparent();
+        if (kind.equals("unsampled")) incoming = incoming.substring(0, 53) + "00";
+        final String expected = incoming;
+        execute(ORDER_DB, "UPDATE messaging_relay_control SET paused=true WHERE id=1");
+        UUID order;
+        String before;
+        try {
+            order = createOrder(List.of(line(sku, 1)));
+            String body = event(ORDER_DB, order, "aggregate_id", "OrderPlaced");
+            var record = new ProducerRecord<String, byte[]>(ORDER_TOPIC, order.toString(), body.getBytes(StandardCharsets.UTF_8));
+            if (!kind.equals("missing")) record.headers().add("traceparent",
+                    (kind.equals("malformed") ? "TRACE_PRIVATE_MALFORMED" : incoming).getBytes(StandardCharsets.US_ASCII));
+            if (kind.equals("duplicate")) record.headers().add("traceparent", incoming.getBytes(StandardCharsets.US_ASCII));
+            var source = producer.send(record).get(15, TimeUnit.SECONDS);
+            committed(source, INVENTORY_GROUP);
+            terminal(order, "CONFIRMED");
+            before = traceContext(INVENTORY_DB, order, "InventoryReserved");
+            assertThat(before).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]");
+            if (kind.equals("unsampled")) assertThat(before).startsWith(expected.substring(0, 36)).endsWith("-00");
+            else assertThat(before.substring(3, 35)).isNotEqualTo(expected.substring(3, 35));
+            var duplicate = new ProducerRecord<String, byte[]>(ORDER_TOPIC, order.toString(), body.getBytes(StandardCharsets.UTF_8));
+            duplicate.headers().add("traceparent", randomTraceparent().getBytes(StandardCharsets.US_ASCII));
+            committed(producer.send(duplicate).get(15, TimeUnit.SECONDS), INVENTORY_GROUP);
+            assertThat(traceContext(INVENTORY_DB, order, "InventoryReserved")).isEqualTo(before);
+            assertThat(event(ORDER_DB, order, "aggregate_id", "OrderPlaced")).isEqualTo(body);
+            assertOneDecision(order);
+        } finally { execute(ORDER_DB, "UPDATE messaging_relay_control SET paused=false WHERE id=1"); }
+        fulfillment(order);
+        assertReserved(sku, 1);
+        if (kind.equals("unsampled")) {
+            assertThat(traceContext(ORDER_DB, order, "OrderConfirmed")).startsWith(expected.substring(0, 36)).endsWith("-00");
+            assertThat(confirmationContext(order)).startsWith(expected.substring(0, 36)).endsWith("-00");
+        }
+    }
+
+    private static RecordMetadata tracedSend(String topic, String key, byte[] value, String incoming) throws Exception {
+        var record = new ProducerRecord<String, byte[]>(topic, key, value);
+        record.headers().add("traceparent", incoming.getBytes(StandardCharsets.US_ASCII));
+        return producer.send(record).get(15, TimeUnit.SECONDS);
+    }
+
+    private static void assertAttemptTrace(String incoming, String service, String operation,
+            int failures, int successes, String label, String... sensitive) throws Exception {
+        await(() -> {
+            try {
+                var spans = TEMPO.trace(incoming.substring(3, 35), label, sensitive);
+                assertAttempts(spans, incoming, service, operation, failures, successes);
+                return true;
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException(interrupted); }
+        }, "actual stored " + service + " " + operation + " attempt relationships", Duration.ofSeconds(30));
+    }
+
+    private static void assertAttempts(List<TempoFixture.TraceSpan> spans, String incoming, String service,
+            String operation, int failures, int successes) {
+        var attempts = spans.stream().filter(x -> x.service().equals(service + "-service") && x.name().equals(operation)).toList();
+        if (attempts.size() < failures + successes) throw new TempoFixture.IncompleteTrace();
+        assertThat(attempts).hasSize(failures + successes);
+        assertThat(attempts).allSatisfy(x -> {
+            assertThat(x.parent()).isEqualTo(incoming.substring(36, 52));
+            assertThat(x.trace()).isEqualTo(incoming.substring(3, 35));
+            assertThat(x.links()).isEmpty();
+        });
+        assertThat(attempts.stream().filter(x -> x.outcome().equals("failure") && x.status().equals("STATUS_CODE_ERROR")).count()).isEqualTo(failures);
+        assertThat(attempts.stream().filter(x -> x.outcome().equals("success") && !x.status().equals("STATUS_CODE_ERROR")).count()).isEqualTo(successes);
+    }
+
+    private static void assertTraceFlow(UUID order, String traceId, String... sensitive) throws Exception {
+        String placed = traceContext(ORDER_DB, order, "OrderPlaced");
+        String reserved = traceContext(INVENTORY_DB, order, "InventoryReserved");
+        String confirmed = traceContext(ORDER_DB, order, "OrderConfirmed");
+        String fulfillment = confirmationContext(order);
+        for (String context : List.of(placed, reserved, confirmed, fulfillment)) {
+            assertThat(context).startsWith("00-" + traceId + "-").endsWith("-01");
+        }
+        await(() -> {
+            try {
+                var spans = TEMPO.trace(traceId, "flow", sensitive);
+                var consumePlaced = TempoFixture.byId(spans, reserved.substring(36, 52), "inventory-service", "warexis.kafka.process");
+                var publishPlaced = TempoFixture.byId(spans, consumePlaced.parent(), "order-service", "warexis.outbox.publish");
+                assertThat(publishPlaced.parent()).isEqualTo(placed.substring(36, 52));
+                TempoFixture.descendsFromHttp(spans, publishPlaced);
+                var consumeReserved = TempoFixture.byId(spans, confirmed.substring(36, 52), "order-service", "warexis.kafka.process");
+                var publishReserved = TempoFixture.byId(spans, consumeReserved.parent(), "inventory-service", "warexis.outbox.publish");
+                assertThat(publishReserved.parent()).isEqualTo(consumePlaced.id());
+                var consumeConfirmed = TempoFixture.byId(spans, fulfillment.substring(36, 52), "fulfillment-service", "warexis.kafka.process");
+                var publishConfirmed = TempoFixture.byId(spans, consumeConfirmed.parent(), "order-service", "warexis.outbox.publish");
+                assertThat(publishConfirmed.parent()).isEqualTo(consumeReserved.id());
+                assertThat(consumePlaced.start()).isGreaterThanOrEqualTo(publishPlaced.start());
+                assertThat(consumeReserved.start()).isGreaterThanOrEqualTo(publishReserved.start());
+                assertThat(consumeConfirmed.start()).isGreaterThanOrEqualTo(publishConfirmed.start());
+                return true;
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException("Trace query interrupted", interrupted); }
+        }, "real Tempo causal chain across durable outboxes and all three services", Duration.ofSeconds(30));
+    }
+
+    private static String randomTraceparent() {
+        return "00-" + UUID.randomUUID().toString().replace("-", "") + "-"
+                + UUID.randomUUID().toString().replace("-", "").substring(0, 16) + "-01";
+    }
+    private static HttpResponse<String> tracedRequest(int port, String path, String method, String body, String parent) throws Exception {
+        return HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).timeout(Duration.ofSeconds(5))
+                .header("Content-Type", "application/json").header("Authorization", "Bearer " + IDENTITY.token("operator"))
+                .header("traceparent", parent).header("baggage", "private=TRACE_PRIVATE_QUERY")
+                .method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body)).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+    private static String traceContext(PostgreSQLContainer database, UUID order, String eventType) throws Exception {
+        return stringColumn(database, "SELECT traceparent FROM outbox_events WHERE correlation_id=? AND event_type='" + eventType + "'", order);
+    }
+    private static String confirmationContext(UUID order) throws Exception {
+        return stringColumn(FULFILLMENT_DB, "SELECT confirmation_traceparent FROM fulfillments WHERE order_id=?", order);
+    }
+    private static String stringColumn(PostgreSQLContainer database, String sql, UUID id) throws Exception {
+        try (var connection = DriverManager.getConnection(database.getJdbcUrl(), database.getUsername(), database.getPassword());
+                var query = connection.prepareStatement(sql)) {
+            query.setObject(1, id);
+            try (var row = query.executeQuery()) { assertThat(row.next()).isTrue(); return row.getString(1); }
         }
     }
 
@@ -1017,7 +1284,9 @@ class KafkaWorkflowTests {
         var historical = group.equals(FULFILLMENT_GROUP) && (kind.equals("malformed") || kind.equals("utf8"))
                 ? send(topic, key, value) : null;
         if (historical != null) committed(historical, group);
-        var metadata = send(topic, key, value);
+        String incoming = randomTraceparent();
+        var metadata = tracedSend(topic, key, value, incoming);
+        String dltContext = null;
         try (var consumer = dltConsumer(dlt)) {
             var partitions = List.of(new TopicPartition(dlt, 0), new TopicPartition(dlt, 1), new TopicPartition(dlt, 2));
             consumer.assign(partitions);
@@ -1043,6 +1312,8 @@ class KafkaWorkflowTests {
                         assertThat(Integer.parseInt(header(record, "warexis-processing-attempts"))).isBetween(0, 4);
                         assertThat(Integer.parseInt(header(record, "warexis-dlt-attempts"))).isBetween(1, 4);
                         java.time.Instant.parse(header(record, "warexis-failed-at"));
+                        dltContext = header(record, "traceparent");
+                        assertThat(dltContext).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01");
                         found = true;
                     }
                 }
@@ -1051,6 +1322,21 @@ class KafkaWorkflowTests {
             if (historical != null) assertThat(historicalFound).as("observer examined the earlier identical DLT record").isTrue();
         }
         committed(metadata, group);
+        assertAttemptTrace(incoming, group.equals(INVENTORY_GROUP) ? "inventory" : group.equals(ORDER_GROUP) ? "order" : "fulfillment",
+                "warexis.kafka.dlt", 0, 1, "poison-dlt", UNSAFE_MARKER);
+        String recordedDlt = dltContext;
+        await(() -> {
+            try {
+                var spans = TEMPO.trace(incoming.substring(3, 35), "poison-dlt-header", UNSAFE_MARKER);
+                var actual = TempoFixture.byId(spans, recordedDlt.substring(36, 52),
+                        group.equals(INVENTORY_GROUP) ? "inventory-service" : group.equals(ORDER_GROUP) ? "order-service" : "fulfillment-service",
+                        "warexis.kafka.dlt");
+                assertThat(actual.trace()).isEqualTo(recordedDlt.substring(3, 35));
+                assertThat(actual.parent()).isEqualTo(incoming.substring(36, 52));
+                return true;
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException(interrupted); }
+        }, "DLT transport carrier identifies actual acknowledged DLT attempt", Duration.ofSeconds(30));
         assertThat(count(ORDER_DB, "SELECT count(*) FROM orders", null)).isEqualTo(orderCount);
         assertThat(count(INVENTORY_DB, "SELECT count(*) FROM inventory_reservations", null)).isEqualTo(reservationCount);
         assertThat(count(FULFILLMENT_DB, "SELECT count(*) FROM fulfillments", null)).isEqualTo(fulfillmentCount);
@@ -1079,6 +1365,9 @@ class KafkaWorkflowTests {
                 "--warexis.messaging.retry-base-delay=10ms", "--warexis.messaging.poll-interval=50ms", "--server.address=127.0.0.1", "--server.port=" + port);
         builder.environment().put("WAREXIS_OAUTH2_ISSUER_URI", IDENTITY.issuer());
         builder.environment().put("WAREXIS_OAUTH2_AUDIENCE", "warexis-api");
+        builder.environment().put("WAREXIS_TRACING_EXPORT_ENABLED", "true");
+        builder.environment().put("WAREXIS_TRACING_SAMPLING_PROBABILITY", "1.0");
+        builder.environment().put("WAREXIS_OTLP_ENDPOINT", TEMPO.endpoint());
         builder.environment().put(name.toUpperCase() + "_DB_URL", database.getJdbcUrl());
         builder.environment().put(name.toUpperCase() + "_DB_USERNAME", database.getUsername());
         builder.environment().put(name.toUpperCase() + "_DB_PASSWORD", database.getPassword());
