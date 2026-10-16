@@ -1,6 +1,8 @@
 package io.github.panteliszara.warexis.order.messaging;
 
 import java.nio.charset.StandardCharsets;
+import io.github.panteliszara.warexis.order.observability.TraceSupport;
+import io.github.panteliszara.warexis.order.observability.TraceParent;
 import java.time.Instant;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -20,6 +22,7 @@ import org.springframework.stereotype.Component;
 @ConditionalOnProperty(name = "warexis.messaging.enabled", havingValue = "true")
 public class InventoryOutcomeListener {
     private static final Logger LOG = LoggerFactory.getLogger(InventoryOutcomeListener.class);
+    private final TraceSupport tracing;
     private final InventoryOutcomeService outcomes;
     private final DeliveryState deliveries;
     private final KafkaTemplate<byte[], byte[]> kafka;
@@ -32,11 +35,18 @@ public class InventoryOutcomeListener {
                 new io.github.panteliszara.warexis.order.observability.OperationalMetrics(null, false));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
     public InventoryOutcomeListener(InventoryOutcomeService outcomes, DeliveryState deliveries,
             KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
             io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics) {
+        this(outcomes, deliveries, kafka, registry, metrics, TraceSupport.noop());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public InventoryOutcomeListener(InventoryOutcomeService outcomes, DeliveryState deliveries,
+            KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
+            io.github.panteliszara.warexis.order.observability.OperationalMetrics metrics, TraceSupport tracing) {
         this.metrics = metrics;
+        this.tracing = tracing;
         this.outcomes = outcomes;
         this.deliveries = deliveries;
         this.kafka = kafka;
@@ -88,15 +98,22 @@ public class InventoryOutcomeListener {
                 if (state.phase().equals("PROCESS")) {
                     boolean newDecision;
                     if (state.processingAttempts() > 0) metrics.processRetried();
+                    var validatedOutcome = new InventoryOutcome[1];
                     try {
-                        outcome = EventJson.outcome(record.key(), record.value());
-                        newDecision = outcomes.apply(outcome);
+                        newDecision = tracing.attempt(TraceSupport.Operation.PROCESS,
+                                TraceParent.fromHeaders(record.headers()), "unknown", () -> {
+                                    validatedOutcome[0] = EventJson.outcome(record.key(), record.value());
+                                    return outcomes.apply(validatedOutcome[0]);
+                                });
+                        outcome = validatedOutcome[0];
                     } catch (PoisonMessageException ex) {
+                        if (validatedOutcome[0] != null) outcome = validatedOutcome[0];
                         metrics.processFailed();
                         logOutcome("DLT", state.processingAttempts() + 1, outcome, record);
                         deliveries.toDlt(record, "INVALID_OR_CONFLICTING");
                         continue;
                     } catch (Exception ex) {
+                        if (validatedOutcome[0] != null) outcome = validatedOutcome[0];
                         metrics.processFailed();
                         logOutcome("PROCESS_RETRY", state.processingAttempts() + 1, outcome, record);
                         continue;
@@ -118,7 +135,11 @@ public class InventoryOutcomeListener {
                     header(dlt, "warexis-failed-at", Instant.now().toString());
                     if (state.dltAttempts() > 0) metrics.dltRetried();
                     try {
-                        kafka.send(dlt).get(12, TimeUnit.SECONDS);
+                        tracing.attempt(TraceSupport.Operation.DLT, TraceParent.fromHeaders(record.headers()), "unknown", () -> {
+                            TraceParent.inject(dlt, tracing.currentTraceparent());
+                            kafka.send(dlt).get(12, TimeUnit.SECONDS);
+                            return null;
+                        });
                     } catch (InterruptedException ex) {
                         metrics.dltFailed();
                         throw ex;

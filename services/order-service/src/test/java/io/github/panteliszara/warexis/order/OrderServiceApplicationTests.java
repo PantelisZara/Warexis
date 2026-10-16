@@ -72,6 +72,9 @@ class OrderServiceApplicationTests {
                 assertThat(result.next()).isTrue();
                 assertThat(result.getString("version")).isEqualTo("3");
                 assertThat(result.getBoolean("success")).isTrue();
+                assertThat(result.next()).isTrue();
+                assertThat(result.getString("version")).isEqualTo("4");
+                assertThat(result.getBoolean("success")).isTrue();
                 assertThat(result.next()).isFalse();
             }
         }

@@ -62,7 +62,8 @@ class OutboxRelayReliabilityTests {
         var registry=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         var metrics=new io.github.panteliszara.warexis.order.observability.OperationalMetrics(registry,true);
         var kafka=(KafkaTemplate<byte[],byte[]>)mock(KafkaTemplate.class);
-        when(kafka.send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class)))
+        when(kafka.send(argThat((org.apache.kafka.clients.producer.ProducerRecord<byte[],byte[]> record) -> record != null
+                && record.topic().equals(KafkaConfiguration.ORDER_TOPIC) && record.key() != null && record.value() != null)))
                 .thenReturn(mode.equals("broker-failure")?CompletableFuture.failedFuture(new IllegalStateException()):CompletableFuture.completedFuture(null));
         if(mode.equals("completion-failure")) {
             jdbc.sql("CREATE FUNCTION reject_metric_publication() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN IF NEW.published_at IS NOT NULL THEN RAISE EXCEPTION ''synthetic metadata failure''; END IF; RETURN NEW; END'").update();
@@ -105,7 +106,8 @@ class OutboxRelayReliabilityTests {
         var kafka=(KafkaTemplate<byte[],byte[]>)mock(KafkaTemplate.class);
         var acknowledged=new CompletableFuture<SendResult<byte[],byte[]>>();
         var sent=new CountDownLatch(1);
-        when(kafka.send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class))).thenAnswer(invocation->{
+        when(kafka.send(argThat((org.apache.kafka.clients.producer.ProducerRecord<byte[],byte[]> record) -> record != null
+                && record.topic().equals(KafkaConfiguration.ORDER_TOPIC) && record.key() != null && record.value() != null))).thenAnswer(invocation->{
             sent.countDown();
             return acknowledged;
         });
@@ -119,7 +121,8 @@ class OutboxRelayReliabilityTests {
                 assertThat(jdbc.sql("SELECT published_at IS NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
                         .param("id",first.id()).param("type",type).query(Boolean.class).single()).isTrue();
                 competitor.publishNext();
-                verify(kafka,times(1)).send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class));
+                verify(kafka,times(1)).send(argThat((org.apache.kafka.clients.producer.ProducerRecord<byte[],byte[]> record) -> record != null
+                && record.topic().equals(KafkaConfiguration.ORDER_TOPIC) && record.key() != null && record.value() != null));
                 assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
                         .param("id",second.id()).param("type",type).query(Integer.class).single()).isZero();
             } finally {
@@ -130,7 +133,8 @@ class OutboxRelayReliabilityTests {
         assertThat(jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
                 .param("id",first.id()).param("type",type).query(Boolean.class).single()).isTrue();
         competitor.publishNext();
-        verify(kafka,times(2)).send(eq(KafkaConfiguration.ORDER_TOPIC),any(byte[].class),any(byte[].class));
+        verify(kafka,times(2)).send(argThat((org.apache.kafka.clients.producer.ProducerRecord<byte[],byte[]> record) -> record != null
+                && record.topic().equals(KafkaConfiguration.ORDER_TOPIC) && record.key() != null && record.value() != null));
         assertThat(jdbc.sql("SELECT published_at IS NOT NULL AND publication_attempts=1 FROM outbox_events WHERE aggregate_id=:id AND event_type=:type")
                 .param("id",second.id()).param("type",type).query(Boolean.class).single()).isTrue();
     }
