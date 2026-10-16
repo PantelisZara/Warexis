@@ -39,7 +39,6 @@ import io.github.panteliszara.warexis.inventory.stock.application.StockItemServi
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -275,7 +274,7 @@ class InventoryMessagingIntegrationTests {
         assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 5 AND published_at IS NULL")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 0 AND published_at IS NULL")).isEqualTo(1);
         new InventoryOutboxPublisher(dataSource, failingKafka, properties, validator, metrics).publishNext();
-        verify(failingKafka, times(5)).send(anyString(), any(byte[].class), any(byte[].class));
+        verify(failingKafka, times(5)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         assertThat(publicationCount("failed") - failures).isEqualTo(5);
         assertThat(meters.get("warexis.outbox.retries").counter().count() - retries).isEqualTo(4);
     }
@@ -370,7 +369,7 @@ class InventoryMessagingIntegrationTests {
         KafkaTemplate<byte[], byte[]> blockingKafka = mock(KafkaTemplate.class);
         var sent = new java.util.concurrent.CountDownLatch(1);
         var confirmation = new CompletableFuture<org.springframework.kafka.support.SendResult<byte[], byte[]>>();
-        when(blockingKafka.send(anyString(), any(byte[].class), any(byte[].class))).thenAnswer(call -> {
+        when(blockingKafka.send(any(org.apache.kafka.clients.producer.ProducerRecord.class))).thenAnswer(call -> {
             sent.countDown();
             return confirmation;
         });
@@ -381,7 +380,7 @@ class InventoryMessagingIntegrationTests {
             try {
                 assertThat(sent.await(5, TimeUnit.SECONDS)).isTrue();
                 second.publishNext();
-                verify(blockingKafka, times(1)).send(anyString(), any(byte[].class), any(byte[].class));
+                verify(blockingKafka, times(1)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
                 assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 1 AND published_at IS NULL")).isEqualTo(1);
             } finally { confirmation.complete(null); }
             publication.get(5, TimeUnit.SECONDS);
@@ -396,7 +395,7 @@ class InventoryMessagingIntegrationTests {
         jdbc.execute("ALTER TABLE outbox_events ADD CONSTRAINT test_fail_relay_attempt CHECK (publication_attempts = 0) NOT VALID");
         try { new InventoryOutboxPublisher(dataSource, transport, properties, validator).publishNext(); }
         finally { jdbc.execute("ALTER TABLE outbox_events DROP CONSTRAINT test_fail_relay_attempt"); }
-        verify(transport, never()).send(anyString(), any(byte[].class), any(byte[].class));
+        verify(transport, never()).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         assertThat(count("SELECT count(*) FROM outbox_events WHERE publication_attempts = 0 AND published_at IS NULL")).isEqualTo(1);
     }
 
@@ -617,7 +616,6 @@ class InventoryMessagingIntegrationTests {
     @SuppressWarnings("unchecked")
     private KafkaTemplate<byte[], byte[]> failingKafka() {
         KafkaTemplate<byte[], byte[]> template = mock(KafkaTemplate.class);
-        when(template.send(anyString(), any(byte[].class), any(byte[].class))).thenReturn(CompletableFuture.failedFuture(new IllegalStateException("synthetic broker failure")));
         when(template.send(any(org.apache.kafka.clients.producer.ProducerRecord.class))).thenReturn(CompletableFuture.failedFuture(new IllegalStateException("synthetic broker failure")));
         return template;
     }

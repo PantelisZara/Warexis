@@ -1,6 +1,8 @@
 package io.github.panteliszara.warexis.inventory.messaging;
 
 import io.github.panteliszara.warexis.inventory.observability.InventoryMetrics;
+import io.github.panteliszara.warexis.inventory.observability.TraceParent;
+import io.github.panteliszara.warexis.inventory.observability.TraceSupport;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.nio.charset.StandardCharsets;
@@ -33,16 +35,24 @@ public class InventoryOrderListener {
     private final InventoryReservationService reservations;
     private final KafkaTemplate<byte[], byte[]> kafka;
     private final InventoryMetrics metrics;
+    private final TraceSupport tracing;
 
     public InventoryOrderListener(ConsumerDeliveryStore delivery, WorkflowEventValidator validator,
                                   InventoryReservationService reservations, KafkaTemplate<byte[], byte[]> kafka) {
         this(delivery, validator, reservations, kafka, InventoryMetrics.disabled());
     }
 
-    @Autowired
     public InventoryOrderListener(ConsumerDeliveryStore delivery, WorkflowEventValidator validator,
                                   InventoryReservationService reservations, KafkaTemplate<byte[], byte[]> kafka,
                                   InventoryMetrics metrics) {
+        this(delivery, validator, reservations, kafka, metrics, TraceSupport.noop());
+    }
+
+    @Autowired
+    public InventoryOrderListener(ConsumerDeliveryStore delivery, WorkflowEventValidator validator,
+                                  InventoryReservationService reservations, KafkaTemplate<byte[], byte[]> kafka,
+                                  InventoryMetrics metrics, TraceSupport tracing) {
+        this.tracing = tracing;
         this.metrics = metrics;
         this.delivery = delivery;
         this.validator = validator;
@@ -86,7 +96,11 @@ public class InventoryOrderListener {
                         header(quarantined, "warexis-processing-attempts", Integer.toString(state.processingAttempts()));
                         header(quarantined, "warexis-dlt-attempts", Integer.toString(state.dltAttempts() + 1));
                         header(quarantined, "warexis-failed-at", Instant.now().toString());
-                        kafka.send(quarantined).get(11, TimeUnit.SECONDS);
+                        tracing.attempt(TraceSupport.Operation.DLT, TraceParent.fromHeaders(record.headers()), "unknown", () -> {
+                            TraceParent.inject(quarantined, tracing.currentTraceparent());
+                            kafka.send(quarantined).get(11, TimeUnit.SECONDS);
+                            return null;
+                        });
                         diagnostic(record, processingAttempt, dltAttempt, "DLT_ACKNOWLEDGED", state.failureCode());
                     } catch (Exception exception) {
                         metrics.failure("dlt");
@@ -128,12 +142,19 @@ public class InventoryOrderListener {
                 processingAttempt++;
                 String outcome;
                 try {
-                    outcome = reservations.processWithOutcome(event.order()).duplicate() ? "duplicate" : "processed";
+                    outcome = tracing.attempt(TraceSupport.Operation.PROCESS,
+                            TraceParent.fromHeaders(record.headers()), event.eventType(), () -> {
+                                // The initial validation gate preserves delivery policy; this validation and the
+                                // transactional service proxy share the claimed attempt, ending after commit.
+                                var validated = validator.validate(record.key(), record.value());
+                                return reservations.processWithOutcome(validated.order()).duplicate() ? "duplicate" : "processed";
+                            });
                 } catch (ConflictingOrderPlacedException exception) {
                     metrics.failure("process");
                     if (delivery.transition(record, "DLT", "IDENTITY_CONFLICT")) diagnostic(record, processingAttempt, dltAttempt, "DLT", "IDENTITY_CONFLICT");
                     continue;
-                } catch (RuntimeException exception) {
+                } catch (Exception exception) {
+                    if (exception instanceof InterruptedException) Thread.currentThread().interrupt();
                     metrics.failure("process");
                     diagnostic(record, processingAttempt, dltAttempt, "PROCESS_RETRY", "TECHNICAL_FAILURE");
                     continue;

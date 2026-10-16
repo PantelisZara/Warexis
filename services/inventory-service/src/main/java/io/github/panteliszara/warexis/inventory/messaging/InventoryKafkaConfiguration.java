@@ -45,6 +45,7 @@ public class InventoryKafkaConfiguration {
         factory.setConsumerFactory(consumers);
         factory.setConcurrency(3);
         factory.setAutoStartup(autoStartup);
+        factory.getContainerProperties().setObservationEnabled(false);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.getContainerProperties().setAssignmentCommitOption(ContainerProperties.AssignmentCommitOption.NEVER);
         factory.setCommonErrorHandler(new CommonContainerStoppingErrorHandler());

@@ -4,23 +4,34 @@ import java.sql.Timestamp;
 import java.util.LinkedHashMap;
 import java.util.UUID;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import tools.jackson.databind.json.JsonMapper;
 
+import io.github.panteliszara.warexis.inventory.observability.TraceParent;
+import io.github.panteliszara.warexis.inventory.observability.TraceSupport;
 import io.github.panteliszara.warexis.inventory.reservations.domain.InventoryReservation;
 
 @Repository
 public class InventoryOutboxRepository {
     private final JdbcTemplate jdbc;
     private final JsonMapper mapper;
+    private final TraceSupport tracing;
 
     public InventoryOutboxRepository(JdbcTemplate jdbc, JsonMapper mapper) {
+        this(jdbc, mapper, TraceSupport.noop());
+    }
+
+    @Autowired
+    public InventoryOutboxRepository(JdbcTemplate jdbc, JsonMapper mapper, TraceSupport tracing) {
+        this.tracing = tracing;
         this.jdbc = jdbc;
         this.mapper = mapper;
     }
 
     public void append(InventoryReservation reservation) {
+        var traceparent = TraceParent.normalize(tracing.currentTraceparent());
         var eventId = UUID.randomUUID();
         var eventType = reservation.status() == InventoryReservation.Status.RESERVED
                 ? "InventoryReserved" : "InventoryRejected";
@@ -42,9 +53,9 @@ public class InventoryOutboxRepository {
         envelope.put("payload", payload);
         jdbc.update("""
                 INSERT INTO outbox_events
-                (event_id, aggregate_id, event_type, event_version, occurred_at, correlation_id, causation_id, event_json)
-                VALUES (?, ?, ?, 1, ?, ?, ?, CAST(? AS jsonb))
+                (event_id, aggregate_id, event_type, event_version, occurred_at, correlation_id, causation_id, event_json, traceparent)
+                VALUES (?, ?, ?, 1, ?, ?, ?, CAST(? AS jsonb), ?)
                 """, eventId, reservation.reservationId(), eventType, Timestamp.from(reservation.decidedAt()),
-                reservation.orderId(), reservation.sourceEventId(), mapper.writeValueAsString(envelope));
+                reservation.orderId(), reservation.sourceEventId(), mapper.writeValueAsString(envelope), traceparent);
     }
 }

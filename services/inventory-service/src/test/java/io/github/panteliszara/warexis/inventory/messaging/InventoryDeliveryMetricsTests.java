@@ -81,6 +81,8 @@ class InventoryDeliveryMetricsTests {
             var listener = listener(registry);
             var factory = new InventoryKafkaConfiguration().inventoryKafkaListenerContainerFactory(
                     mock(ConsumerFactory.class), delivery, false);
+            assertThat(factory.getContainerProperties().isObservationEnabled()).isFalse();
+            assertThat(factory.getContainerProperties().isMicrometerEnabled()).isTrue();
             var rebalance = (ConsumerAwareRebalanceListener) factory.getContainerProperties().getConsumerRebalanceListener();
             rebalance.onPartitionsAssigned(consumer, List.of(partition));
             verify(consumer).pause(metadataUnavailable ? List.of(partition) : Set.of(partition));

@@ -41,6 +41,9 @@ class InventoryServiceApplicationTests {
     @Autowired
     private Flyway flyway;
 
+    @Autowired
+    private org.springframework.context.ApplicationContext context;
+
     @LocalServerPort
     private int port;
 
@@ -57,8 +60,27 @@ class InventoryServiceApplicationTests {
         }
 
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
-        assertThat(flyway.info().applied()).hasSize(3);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("3");
+        assertThat(flyway.info().applied()).hasSize(4);
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("4");
+    }
+
+    @Test
+    void tracingDefaultsBindExactBoundsAndDisableAllOtlpExporters() {
+        var properties = context.getBean(org.springframework.boot.micrometer.tracing.opentelemetry.autoconfigure.OpenTelemetryTracingProperties.class).getExport();
+        assertThat(properties.getMaxQueueSize()).isEqualTo(16);
+        assertThat(properties.getMaxBatchSize()).isEqualTo(4);
+        assertThat(properties.getScheduleDelay()).isEqualTo(Duration.ofMillis(50));
+        assertThat(properties.getTimeout()).isEqualTo(Duration.ofMillis(500));
+        var otlp = context.getBean(org.springframework.boot.micrometer.tracing.opentelemetry.autoconfigure.otlp.OtlpTracingProperties.class);
+        assertThat(otlp.getTransport().name()).isEqualTo("HTTP");
+        assertThat(otlp.getTimeout()).isEqualTo(Duration.ofMillis(250));
+        assertThat(otlp.getConnectTimeout()).isEqualTo(Duration.ofMillis(100));
+        assertThat(context.getBeansOfType(io.opentelemetry.sdk.trace.export.SpanExporter.class)).isEmpty();
+        assertThat(context.getBeansOfType(io.opentelemetry.sdk.logs.export.LogRecordExporter.class)).isEmpty();
+        assertThat(context.getBeansOfType(io.micrometer.registry.otlp.OtlpMeterRegistry.class)).isEmpty();
+        assertThat(context.getEnvironment().getProperty("management.tracing.export.otlp.enabled", Boolean.class)).isFalse();
+        assertThat(context.getEnvironment().getProperty("management.tracing.sampling.probability", Double.class)).isEqualTo(0.1);
+        assertThat(context.getEnvironment().getProperty("management.opentelemetry.map-environment-variables", Boolean.class)).isFalse();
     }
 
     @Test
