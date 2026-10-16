@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.github.panteliszara.warexis.fulfillment.application.FulfillmentService;
+import io.github.panteliszara.warexis.fulfillment.application.DispatchService;
 import io.github.panteliszara.warexis.fulfillment.application.FulfillmentView;
 
 @RestController
@@ -20,8 +21,17 @@ import io.github.panteliszara.warexis.fulfillment.application.FulfillmentView;
 public class FulfillmentController {
     private final FulfillmentService service;
 
+    private final DispatchService dispatch;
+
     public FulfillmentController(FulfillmentService service) {
+        this(service, new DispatchService(service,
+                io.github.panteliszara.warexis.fulfillment.observability.TraceSupport.noop()));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public FulfillmentController(FulfillmentService service, DispatchService dispatch) {
         this.service = service;
+        this.dispatch = dispatch;
     }
 
     @GetMapping("/{id}")
@@ -36,7 +46,7 @@ public class FulfillmentController {
 
     @PostMapping("/{id}/ship")
     public FulfillmentView ship(@PathVariable String id, @Valid @RequestBody ShipRequest request) {
-        return service.ship(identifier(id), request.shipmentReference());
+        return dispatch.ship(identifier(id), request.shipmentReference());
     }
 
     public record ShipRequest(

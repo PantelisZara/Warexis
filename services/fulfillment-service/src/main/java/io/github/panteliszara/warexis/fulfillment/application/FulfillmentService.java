@@ -1,6 +1,8 @@
 package io.github.panteliszara.warexis.fulfillment.application;
 
 import java.sql.Timestamp;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceSupport;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceParent;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -18,9 +20,16 @@ import io.github.panteliszara.warexis.fulfillment.messaging.PoisonMessageExcepti
 public class FulfillmentService {
     private final JdbcClient jdbc;
     private final JsonMapper json;
+    private final TraceSupport tracing;
     public FulfillmentService(JdbcClient jdbc, JsonMapper json) {
+        this(jdbc, json, TraceSupport.noop());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public FulfillmentService(JdbcClient jdbc, JsonMapper json, TraceSupport tracing) {
         this.jdbc = jdbc;
         this.json = json;
+        this.tracing = tracing;
     }
 
     @Transactional
@@ -63,10 +72,11 @@ public class FulfillmentService {
             id = UUID.randomUUID();
             var now = Instant.now().truncatedTo(ChronoUnit.MICROS);
             requireOne(jdbc.sql("""
-                    INSERT INTO fulfillments(id,order_id,reservation_id,confirmation_event_id,confirmation_causation_id,status,created_at,updated_at)
-                    VALUES(:id,:order,:reservation,:event,:cause,'PENDING',:now,:now)
+                    INSERT INTO fulfillments(id,order_id,reservation_id,confirmation_event_id,confirmation_causation_id,status,created_at,updated_at,confirmation_traceparent)
+                    VALUES(:id,:order,:reservation,:event,:cause,'PENDING',:now,:now,:traceparent)
                     """).param("id",id).param("order",input.orderId()).param("reservation",input.reservationId())
-                    .param("event",input.eventId()).param("cause",input.causationId()).param("now",Timestamp.from(now)).update());
+                    .param("event",input.eventId()).param("cause",input.causationId()).param("now",Timestamp.from(now))
+                    .param("traceparent", TraceParent.normalize(tracing.currentTraceparent())).update());
             for (int n=0;n<input.lines().size();n++) {
                 var line=input.lines().get(n);
                 requireOne(jdbc.sql("INSERT INTO fulfillment_lines VALUES(:id,:line,:position,:sku,:quantity)")
@@ -109,6 +119,13 @@ public class FulfillmentService {
                 .query(UUID.class).optional().orElseThrow(FulfillmentNotFoundException::new));
     }
 
+    @Transactional(readOnly = true)
+    public String confirmationTraceparent(UUID id) {
+        var values = jdbc.sql("SELECT confirmation_traceparent FROM fulfillments WHERE id=:id")
+                .param("id", id).query((row, n) -> row.getString(1)).list();
+        return values.isEmpty() ? null : TraceParent.normalize(values.getFirst());
+    }
+
     @Transactional
     public FulfillmentView ship(UUID id, String reference) {
         if (reference == null || !reference.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")) {
@@ -139,10 +156,11 @@ public class FulfillmentService {
         var envelope=Map.of("eventId",eventId,"eventType","FulfillmentShipped","eventVersion",1,"occurredAt",now,
                 "aggregateId",id,"correlationId",view.orderId(),"payload",payload);
         requireOne(jdbc.sql("""
-                INSERT INTO outbox_events(event_id,aggregate_id,event_type,event_version,occurred_at,correlation_id,event_json)
-                VALUES(:event,:id,'FulfillmentShipped',1,:now,:order,CAST(:json AS jsonb))
+                INSERT INTO outbox_events(event_id,aggregate_id,event_type,event_version,occurred_at,correlation_id,event_json,traceparent)
+                VALUES(:event,:id,'FulfillmentShipped',1,:now,:order,CAST(:json AS jsonb),:traceparent)
                 """).param("event",eventId).param("id",id).param("now",Timestamp.from(now)).param("order",view.orderId())
-                .param("json",json.writeValueAsString(envelope)).update());
+                .param("json",json.writeValueAsString(envelope))
+                .param("traceparent", TraceParent.normalize(tracing.currentTraceparent())).update());
         return load(id);
     }
 

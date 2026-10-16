@@ -1,6 +1,9 @@
 package io.github.panteliszara.warexis.fulfillment.messaging;
 
 import java.nio.charset.StandardCharsets;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceSupport;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceParent;
+import org.apache.kafka.clients.producer.ProducerRecord;
 
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -23,6 +26,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class OutboxRelay {
     private static final Logger LOG = LoggerFactory.getLogger(OutboxRelay.class);
     private final io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics;
+    private final TraceSupport tracing;
     private final DataSource dataSource;
     private final JdbcClient jdbc;
     private final KafkaTemplate<byte[], byte[]> kafka;
@@ -35,10 +39,17 @@ public class OutboxRelay {
                 new io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics(null, false));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
     public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
             MessagingProperties properties, PlatformTransactionManager transactions,
             io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics) {
+        this(dataSource, jdbc, kafka, properties, transactions, metrics, TraceSupport.noop());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public OutboxRelay(DataSource dataSource, JdbcClient jdbc, KafkaTemplate<byte[], byte[]> kafka,
+            MessagingProperties properties, PlatformTransactionManager transactions,
+            io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics, TraceSupport tracing) {
+        this.tracing = tracing;
         this.metrics = metrics;
         this.dataSource = dataSource;
         this.jdbc = jdbc;
@@ -62,10 +73,10 @@ public class OutboxRelay {
                     return;
                 }
                 var pending = jdbc.sql("""
-                        SELECT event_id, correlation_id, event_json::text, publication_attempts, next_attempt_at
+                        SELECT event_id, correlation_id, event_json::text, publication_attempts, next_attempt_at, traceparent
                         FROM outbox_events WHERE published_at IS NULL ORDER BY occurred_at, event_id LIMIT 1
                         """).query((rs, n) -> new Pending(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
-                        rs.getString(3), rs.getInt(4), rs.getTimestamp(5))).optional();
+                        rs.getString(3), rs.getInt(4), rs.getTimestamp(5), TraceParent.normalize(rs.getString(6)))).optional();
                 if (pending.isEmpty()) {
                     return;
                 }
@@ -92,11 +103,16 @@ public class OutboxRelay {
                         properties.retryBaseDelay().multipliedBy(1L << event.attempts())))).update()));
                 if (event.attempts() > 0) metrics.publicationRetried();
                 try {
-                    kafka.send(KafkaConfiguration.FULFILLMENT_TOPIC, key, body).get(12, TimeUnit.SECONDS);
-                    transaction.executeWithoutResult(status -> requireOne(jdbc.sql("""
+                    tracing.attempt(TraceSupport.Operation.PUBLISH, event.traceparent(), "FulfillmentShipped", () -> {
+                        var record = new ProducerRecord<byte[], byte[]>(KafkaConfiguration.FULFILLMENT_TOPIC, key, body);
+                        TraceParent.inject(record, tracing.currentTraceparent());
+                        kafka.send(record).get(12, TimeUnit.SECONDS);
+                        transaction.executeWithoutResult(status -> requireOne(jdbc.sql("""
                             UPDATE outbox_events SET published_at = GREATEST(CURRENT_TIMESTAMP, occurred_at), next_attempt_at = NULL
                             WHERE event_id = :id AND published_at IS NULL
                             """).param("id", event.id()).update()));
+                        return null;
+                    });
                     metrics.published();
                 } catch (Exception ex) {
                     metrics.publicationFailed();
@@ -136,6 +152,6 @@ public class OutboxRelay {
                 event.id(), event.orderId(), attempt, classification);
     }
 
-    private record Pending(UUID id, UUID orderId, String json, int attempts, Timestamp nextAt) {
+    private record Pending(UUID id, UUID orderId, String json, int attempts, Timestamp nextAt, String traceparent) {
     }
 }

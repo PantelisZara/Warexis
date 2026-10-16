@@ -23,6 +23,7 @@ import static org.assertj.core.api.Assertions.*;
 @Import(FulfillmentServiceTests.PostgresConfiguration.class)
 class FulfillmentServiceTests {
     @Autowired FulfillmentService service;
+    @Autowired org.springframework.context.ApplicationContext context;
     @Autowired JdbcClient jdbc;
     @Autowired JsonMapper json;
     @Autowired org.flywaydb.core.Flyway flyway;
@@ -37,9 +38,14 @@ class FulfillmentServiceTests {
         assertThat(service.accept(alias(in))).isFalse();
         assertThat(count("fulfillments","order_id",in.orderId())).isEqualTo(1);
     }
+    @Test void defaultTracingExportCreatesNoNetworkExporterAndLeavesMetricsAndLogsOff() {
+        assertThat(context.getBeansOfType(io.opentelemetry.sdk.trace.export.SpanExporter.class)).isEmpty();
+        assertThat(context.getBeanProvider(io.micrometer.registry.otlp.OtlpMeterRegistry.class).stream()).isEmpty();
+        assertThat(context.getBeansOfType(io.opentelemetry.sdk.logs.export.LogRecordExporter.class)).isEmpty();
+    }
     @Test void migrationsAndOwnedDatabaseValidate() {
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
-        assertThat(jdbc.sql("SELECT COUNT(*) FROM flyway_schema_history WHERE success=true").query(Long.class).single()).isEqualTo(1);
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM flyway_schema_history WHERE success=true").query(Long.class).single()).isEqualTo(2);
         assertThat(jdbc.sql("SELECT version()").query(String.class).single()).contains("PostgreSQL 18");
     }
     @Test void createsPendingOriginalOrderedSnapshotAndGetsThroughBothRoutes() throws Exception {

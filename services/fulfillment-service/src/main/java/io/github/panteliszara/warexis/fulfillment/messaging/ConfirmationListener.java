@@ -1,6 +1,8 @@
 package io.github.panteliszara.warexis.fulfillment.messaging;
 
 import java.nio.charset.StandardCharsets;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceSupport;
+import io.github.panteliszara.warexis.fulfillment.observability.TraceParent;
 
 import io.github.panteliszara.warexis.fulfillment.application.FulfillmentService;
 import java.time.Instant;
@@ -23,6 +25,7 @@ import org.springframework.stereotype.Component;
 public class ConfirmationListener {
     private static final Logger LOG = LoggerFactory.getLogger(ConfirmationListener.class);
     private final io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics;
+    private final TraceSupport tracing;
     private final FulfillmentService outcomes;
     private final DeliveryState deliveries;
     private final KafkaTemplate<byte[], byte[]> kafka;
@@ -34,10 +37,17 @@ public class ConfirmationListener {
                 new io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics(null, false));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
     public ConfirmationListener(FulfillmentService outcomes, DeliveryState deliveries,
             KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
             io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics) {
+        this(outcomes, deliveries, kafka, registry, metrics, TraceSupport.noop());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ConfirmationListener(FulfillmentService outcomes, DeliveryState deliveries,
+            KafkaTemplate<byte[], byte[]> kafka, KafkaListenerEndpointRegistry registry,
+            io.github.panteliszara.warexis.fulfillment.observability.OperationalMetrics metrics, TraceSupport tracing) {
+        this.tracing = tracing;
         this.metrics = metrics;
         this.outcomes = outcomes;
         this.deliveries = deliveries;
@@ -106,8 +116,13 @@ public class ConfirmationListener {
                     boolean newDecision;
                     if (state.processingAttempts() > 0) metrics.processRetried();
                     try {
-                        outcome = EventJson.confirmation(record.key(), record.value());
-                        newDecision = outcomes.accept(outcome);
+                        var result = tracing.attempt(TraceSupport.Operation.PROCESS,
+                                TraceParent.fromHeaders(record.headers()), "OrderConfirmed", () -> {
+                                    var validated = EventJson.confirmation(record.key(), record.value());
+                                    return new Processed(validated, outcomes.accept(validated));
+                                });
+                        outcome = result.outcome();
+                        newDecision = result.newDecision();
                     } catch (PoisonMessageException ex) {
                         metrics.processFailed();
                         logOutcome("DLT", state.processingAttempts() + 1, outcome, record);
@@ -135,7 +150,12 @@ public class ConfirmationListener {
                     header(dlt, "warexis-failed-at", Instant.now().toString());
                     if (state.dltAttempts() > 0) metrics.dltRetried();
                     try {
-                        kafka.send(dlt).get(12, TimeUnit.SECONDS);
+                        tracing.attempt(TraceSupport.Operation.DLT,
+                                TraceParent.fromHeaders(record.headers()), "unknown", () -> {
+                                    TraceParent.inject(dlt, tracing.currentTraceparent());
+                                    kafka.send(dlt).get(12, TimeUnit.SECONDS);
+                                    return null;
+                                });
                     } catch (InterruptedException ex) {
                         metrics.dltFailed();
                         throw ex;
@@ -159,6 +179,9 @@ public class ConfirmationListener {
             // Fail closed if retry persistence or source acknowledgment is unavailable.
             pause(record, consumer);
         }
+    }
+
+    private record Processed(Confirmation outcome, boolean newDecision) {
     }
 
     private void pause(ConsumerRecord<byte[], byte[]> record, Consumer<byte[], byte[]> consumer) {

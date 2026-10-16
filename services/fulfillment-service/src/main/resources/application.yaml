@@ -31,6 +31,33 @@ warexis:
     poll-interval: ${WAREXIS_MESSAGING_POLL_INTERVAL:250ms}
 
 management:
+  tracing:
+    sampling:
+      probability: ${WAREXIS_TRACING_SAMPLING_PROBABILITY:0.1}
+    export:
+      otlp:
+        enabled: ${WAREXIS_TRACING_EXPORT_ENABLED:false}
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  opentelemetry:
+    map-environment-variables: false
+    tracing:
+      export:
+        max-queue-size: 16
+        max-batch-size: 4
+        schedule-delay: 50ms
+        timeout: 500ms
+        otlp:
+          transport: http
+          endpoint: ${WAREXIS_OTLP_ENDPOINT:http://127.0.0.1:4318/v1/traces}
+          timeout: 250ms
+          connect-timeout: 100ms
   metrics:
     enable:
       disk: false

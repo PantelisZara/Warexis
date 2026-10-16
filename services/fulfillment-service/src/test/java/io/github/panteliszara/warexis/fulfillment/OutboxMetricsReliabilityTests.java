@@ -38,7 +38,7 @@ class OutboxMetricsReliabilityTests {
     @Test @SuppressWarnings("unchecked") void realRelayCountsFailedAttemptsRetriesAndOnlyDurablyPublishedSuccess() {
         var registry = new SimpleMeterRegistry();
         var kafka = (KafkaTemplate<byte[], byte[]>)mock(KafkaTemplate.class);
-        when(kafka.send(anyString(), any(byte[].class), any(byte[].class))).thenReturn(
+        when(kafka.send(any(org.apache.kafka.clients.producer.ProducerRecord.class))).thenReturn(
                 CompletableFuture.failedFuture(new IllegalStateException("broker unavailable")), CompletableFuture.completedFuture(null));
         var relay=relay(kafka,registry);
         var input=FulfillmentServiceTests.input(); service.accept(input); var plan=service.byOrder(input.orderId());
@@ -49,7 +49,7 @@ class OutboxMetricsReliabilityTests {
         assertThat(registry.get("warexis.outbox.retries").counter().count()).isZero();
         jdbc.sql("UPDATE outbox_events SET next_attempt_at=CURRENT_TIMESTAMP + INTERVAL '1 hour'").update();
         relay.publishNext();
-        verify(kafka,times(1)).send(anyString(),any(byte[].class),any(byte[].class));
+        verify(kafka,times(1)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         jdbc.sql("UPDATE outbox_events SET next_attempt_at=NULL").update();
         relay.publishNext();
         assertThat(count(registry,"published")).isEqualTo(1);
@@ -57,20 +57,20 @@ class OutboxMetricsReliabilityTests {
         assertThat(jdbc.sql("SELECT publication_attempts FROM outbox_events").query(Integer.class).single()).isEqualTo(2);
         assertThat(jdbc.sql("SELECT published_at IS NOT NULL FROM outbox_events").query(Boolean.class).single()).isTrue();
         relay.publishNext();
-        verify(kafka,times(2)).send(anyString(),any(byte[].class),any(byte[].class));
+        verify(kafka,times(2)).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
         assertThat(count(registry,"published")).isEqualTo(1);
     }
 
     @Test @SuppressWarnings("unchecked") void brokerAckWithRolledBackCheckpointCountsFailureRatherThanPublished() {
         var registry = new SimpleMeterRegistry();
         var kafka = (KafkaTemplate<byte[], byte[]>)mock(KafkaTemplate.class);
-        when(kafka.send(anyString(),any(byte[].class),any(byte[].class))).thenReturn(CompletableFuture.completedFuture(null));
+        when(kafka.send(any(org.apache.kafka.clients.producer.ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(null));
         var input=FulfillmentServiceTests.input(); service.accept(input); var plan=service.byOrder(input.orderId());
         service.ship(plan.id(),"METRICS-ROLLBACK");
         jdbc.sql("ALTER TABLE outbox_events ADD CONSTRAINT reject_metric_publication CHECK(published_at IS NULL) NOT VALID").update();
         try {
             relay(kafka,registry).publishNext();
-            verify(kafka).send(anyString(),any(byte[].class),any(byte[].class));
+            verify(kafka).send(any(org.apache.kafka.clients.producer.ProducerRecord.class));
             assertThat(count(registry,"published")).isZero();
             assertThat(count(registry,"failed")).isEqualTo(1);
             assertThat(jdbc.sql("SELECT published_at IS NULL FROM outbox_events").query(Boolean.class).single()).isTrue();
