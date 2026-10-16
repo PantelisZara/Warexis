@@ -1,0 +1,13 @@
+# Optional overlay: use with compose.monitoring.yaml and compose.tracing.yaml.
+# Both private runtime env files are required. Authentication stays inherited.
+services:
+  grafana:
+    environment:
+      WAREXIS_TEMPO_URL: http://127.0.0.1:${WAREXIS_TEMPO_QUERY_PORT:?Prepare tracing runtime}
+    volumes:
+      - type: bind
+        source: ${WAREXIS_TRACING_RUNTIME:?Prepare tracing runtime}/grafana-provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+        bind:
+          create_host_path: false

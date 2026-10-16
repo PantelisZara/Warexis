@@ -1,0 +1,9 @@
+apiVersion: 1
+datasources:
+  - name: Warexis Tempo
+    uid: warexis-tempo
+    type: tempo
+    access: proxy
+    url: ${WAREXIS_TEMPO_URL}
+    isDefault: false
+    editable: false

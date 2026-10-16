@@ -1,0 +1,26 @@
+# Optional local Tempo; prepare its private external runtime first.
+services:
+  tempo:
+    image: grafana/tempo:3.1.0@sha256:3076b8dcdfb32fd6bc5ccef85e7b7313e6199b9cb84366257fc17ecb696db5fd
+    user: "${WAREXIS_TRACING_UID:?Prepare tracing runtime}:${WAREXIS_TRACING_GID:?Prepare tracing runtime}"
+    restart: unless-stopped
+    command: [-target=all, -config.file=/etc/tempo/tempo.yaml]
+    ports:
+      - "127.0.0.1:${WAREXIS_TEMPO_QUERY_PORT:?Prepare tracing runtime}:3200"
+      - "127.0.0.1:${WAREXIS_TEMPO_OTLP_HTTP_PORT:?Prepare tracing runtime}:4318"
+    volumes:
+      - type: bind
+        source: ${WAREXIS_TRACING_RUNTIME:?Prepare tracing runtime}/tempo.yaml
+        target: /etc/tempo/tempo.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WAREXIS_TRACING_RUNTIME:?Prepare tracing runtime}/tempo-data
+        target: /var/tempo
+        bind:
+          create_host_path: false
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
