@@ -1,0 +1,616 @@
+# Local single-node stateful dependencies; PVCs survive pod restarts.
+# PostgreSQL 18 stores its versioned data below /var/lib/postgresql.
+# PostgreSQL retains image entrypoint ownership capabilities; Kafka is UID/GID 1000.
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-postgres
+  labels:
+    app.kubernetes.io/name: order-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: order-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: order-postgres
+  labels:
+    app.kubernetes.io/name: order-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  serviceName: order-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-postgres
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: postgres
+        image: postgres:18.6
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: warexis_order
+        - name: POSTGRES_USER
+          value: warexis_order
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: ORDER_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-postgres
+  labels:
+    app.kubernetes.io/name: inventory-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: inventory-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: inventory-postgres
+  labels:
+    app.kubernetes.io/name: inventory-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  serviceName: inventory-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inventory-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inventory-postgres
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: postgres
+        image: postgres:18.6
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: warexis_inventory
+        - name: POSTGRES_USER
+          value: warexis_inventory
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: INVENTORY_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fulfillment-postgres
+  labels:
+    app.kubernetes.io/name: fulfillment-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: fulfillment-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fulfillment-postgres
+  labels:
+    app.kubernetes.io/name: fulfillment-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  serviceName: fulfillment-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fulfillment-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fulfillment-postgres
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: postgres
+        image: postgres:18.6
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: warexis_fulfillment
+        - name: POSTGRES_USER
+          value: warexis_fulfillment
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: FULFILLMENT_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-postgres
+  labels:
+    app.kubernetes.io/name: keycloak-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak-postgres
+  labels:
+    app.kubernetes.io/name: keycloak-postgres
+    app.kubernetes.io/part-of: warexis
+spec:
+  serviceName: keycloak-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak-postgres
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: postgres
+        image: postgres:18.6
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: warexis_identity
+        - name: POSTGRES_USER
+          value: warexis_identity
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: KEYCLOAK_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+  - name: broker
+    port: 29092
+    targetPort: broker
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: warexis
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+  - name: controller
+    port: 29093
+    targetPort: controller
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: warexis
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: kafka
+        image: apache/kafka:4.2.2
+        ports:
+        - name: broker
+          containerPort: 29092
+        - name: controller
+          containerPort: 29093
+        env:
+        - name: CLUSTER_ID
+          value: 4L6g3nShT-eMCtK--X86sw
+        - name: KAFKA_NODE_ID
+          value: '1'
+        - name: KAFKA_PROCESS_ROLES
+          value: broker,controller
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: 1@kafka-0.kafka-headless:29093
+        - name: KAFKA_LISTENERS
+          value: INTERNAL://:29092,CONTROLLER://:29093
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: INTERNAL://kafka:29092
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: INTERNAL
+        - name: KAFKA_CONTROLLER_LISTENER_NAMES
+          value: CONTROLLER
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+          value: '1'
+        - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+          value: '1'
+        - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR
+          value: '1'
+        - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+          value: '0'
+        - name: KAFKA_LOG_DIRS
+          value: /var/lib/kafka/data
+        - name: KAFKA_HEAP_OPTS
+          value: -Xms512m -Xmx512m
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/kafka/data
+        startupProbe:
+          tcpSocket:
+            port: broker
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 45
+        readinessProbe:
+          exec:
+            command:
+            - env
+            - KAFKA_HEAP_OPTS=-Xms16m -Xmx64m
+            - /opt/kafka/bin/kafka-topics.sh
+            - --bootstrap-server
+            - 127.0.0.1:29092
+            - --list
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 4
+        livenessProbe:
+          tcpSocket:
+            port: broker
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 2Gi

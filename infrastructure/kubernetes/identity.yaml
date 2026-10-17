@@ -1,0 +1,153 @@
+# Local development identity only; kind maps HTTP to host loopback.
+# Management health remains pod-internal and is never exposed by the Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: warexis
+spec:
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    nodePort: 30080
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: warexis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: warexis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      initContainers:
+      - name: wait-for-database
+        image: postgres:18.6
+        command:
+        - sh
+        - -ec
+        - until pg_isready -h keycloak-postgres -p 5432 -U warexis_identity -d warexis_identity;
+          do sleep 2; done
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:26.8.0
+        args:
+        - start-dev
+        - --import-realm
+        env:
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_URL
+          value: jdbc:postgresql://keycloak-postgres:5432/warexis_identity
+        - name: KC_DB_USERNAME
+          value: warexis_identity
+        - name: KC_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: KEYCLOAK_DB_PASSWORD
+        - name: KC_HOSTNAME
+          value: http://127.0.0.1:18080
+        - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+          value: 'true'
+        - name: KC_BOOTSTRAP_ADMIN_CLIENT_ID
+          value: warexis-bootstrap-admin
+        - name: KC_BOOTSTRAP_ADMIN_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: warexis-runtime
+              key: KC_BOOTSTRAP_ADMIN_CLIENT_SECRET
+        - name: KC_HEALTH_ENABLED
+          value: 'true'
+        - name: KC_METRICS_ENABLED
+          value: 'true'
+        - name: JAVA_OPTS_KC_HEAP
+          value: -Xms256m -Xmx512m
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: management
+          containerPort: 9000
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: realm
+          mountPath: /opt/keycloak/data/import
+          readOnly: true
+        startupProbe:
+          httpGet:
+            path: /health/ready
+            port: management
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: management
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: management
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 6
+      volumes:
+      - name: realm
+        configMap:
+          name: warexis-realm
+          items:
+          - key: warexis-realm.json
+            path: warexis-realm.json
