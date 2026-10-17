@@ -98,7 +98,8 @@ Counters are process-local observations and reset on service restart. Five-minut
 totals. Low-traffic/new series may lack enough samples; missing data and NaN are
 unknown, never silently replaced with zero. A failed scrape is `up=0`; an absent
 target is missing. These dashboards do not claim broker consumer lag. Queryable
-tracing and durable asynchronous context are a separate, later gate.
+tracing and durable asynchronous context are implemented separately; see the
+[local tracing guide](../tracing/README.md).
 
 Normal success, rejection, duplicates, an outbox backlog/recovery, a safe retry
 and DLT exercise should change the corresponding series in the real disposable
