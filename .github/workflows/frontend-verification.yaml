@@ -35,6 +35,8 @@ jobs:
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
+      - name: Typecheck browser regression suite
+        run: npm run typecheck:e2e
       - name: Component and API tests
         run: npm run test
       - name: Build production assets
