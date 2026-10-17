@@ -10,13 +10,33 @@ if [[ $# != 1 || "$1" != apply ]]; then
 fi
 [[ -f "$config" ]] || { echo 'Create the dedicated cluster first.' >&2; exit 1; }
 k=(kubectl --kubeconfig "$config" --context kind-warexis-phase11)
-[[ "$("${k[@]}" config current-context)" == kind-warexis-phase11 ]] || exit 1
-# Refuse to apply against an unrelated context/cluster, even if a kubeconfig is replaced.
-[[ "$("${k[@]}" get node warexis-phase11-control-plane -o jsonpath='{.metadata.labels.kind\.x-k8s\.io/cluster}')" == warexis-phase11 ]] || {
-  # kind does not guarantee a cluster-name node label; verify the unique node identity as well.
-  [[ "$("${k[@]}" get nodes -o jsonpath='{.items[*].metadata.name}')" == warexis-phase11-control-plane ]] || exit 1
-}
-python3 "$root/infrastructure/kubernetes/scripts/secrets.py" "$state/secrets"
+# Verify the recorded Docker node ID, named context and loopback API before mutation.
+"$root/infrastructure/kubernetes/scripts/cluster.sh" status >/dev/null
+# Never recreate credentials against existing durable DBs, or silently overwrite drift.
+if [[ ! -f "$state/secrets/runtime.env" ]]; then
+  existing_claims="$("${k[@]}" -n warexis get pvc -o name --ignore-not-found)"
+  [[ -z "$existing_claims" ]] || {
+    echo 'Durable volumes exist but private credentials are missing; restore matching inputs. Refusing new credentials.' >&2
+    exit 1
+  }
+fi
+existing_secret="$("${k[@]}" -n warexis get secret warexis-runtime --ignore-not-found -o json)"
+if [[ -n "$existing_secret" ]]; then
+  [[ -f "$state/secrets/runtime.env" ]] || {
+    echo 'Runtime Secret exists but private input is missing; restore the matching private input. Refusing credential replacement.' >&2
+    exit 1
+  }
+  printf '%s' "$existing_secret" | python3 -c '
+import base64, json, pathlib, sys
+current=json.load(sys.stdin).get("data", {})
+expected=dict(line.split("=", 1) for line in pathlib.Path(sys.argv[1]).read_text().splitlines())
+actual={k:base64.b64decode(v, validate=True).decode() for k,v in current.items()}
+if actual != expected:
+    sys.exit("Private input and existing Secret differ; inspect matching credentials privately before redeploying")
+' "$state/secrets/runtime.env"
+fi
+unset existing_secret
+python3 "$root/infrastructure/kubernetes/scripts/generate-secrets.py" "$state/secrets"
 "${k[@]}" apply -f "$root/infrastructure/kubernetes/namespace.yaml"
 # Pipe generated manifests directly. Server-side apply avoids a second last-applied credential copy.
 "${k[@]}" -n warexis create secret generic warexis-runtime --from-env-file="$state/secrets/runtime.env" --dry-run=client -o json |
