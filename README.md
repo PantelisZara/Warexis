@@ -141,3 +141,7 @@ Read the decisions on [service ownership](docs/architecture/adr/0001-service-bou
 - The APIs provide individual record lookups, not collection browsing, aggregate analytics, customer management, payments or an event-history interface.
 - Outbox, deduplication and delivery records have no automatic retention policy; dead-letter redrive requires diagnosis and deliberate operator recovery.
 - Compose and Kubernetes are local development environments. Production TLS, high availability, replicated-broker failover, capacity benchmarks and public deployment are outside the verified scope.
+
+## License
+
+Warexis project code is licensed under the [MIT License](LICENSE), copyright © 2026 Pantelis Zarakis. Bundled third-party files retain their original licenses and notices; see [third-party notices](THIRD_PARTY_NOTICES.md).
