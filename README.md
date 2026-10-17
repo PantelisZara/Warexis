@@ -1,107 +1,143 @@
+<img src="frontend/public/brand/warexis-icon-red.svg" alt="Warexis symbol" width="52">
+
 # Warexis
 
-Warexis is an event-driven Order, Inventory & Fulfillment Platform. Its focus is distributed backend services and business workflows: coordinating orders, reserving stock, and recording manual fulfillment dispatch.
+An event-driven order, inventory and fulfillment platform built as a personal engineering portfolio project. Three Java services coordinate stock reservations and manual dispatch through Kafka, with a React operations workspace and independently owned PostgreSQL databases.
 
-## Project status
+## Application
 
-Warexis implements three independently owned services: Order, Inventory, and Fulfillment. Order creation atomically stores an order and `OrderPlaced` outbox fact. Inventory makes an all-or-nothing reservation decision and publishes its outcome. Order accepts the first valid outcome, becomes `CONFIRMED` or `REJECTED`, and atomically stores `OrderConfirmed` on confirmation. Fulfillment consumes that confirmation to create one `PENDING` plan with the original ordered lines. An explicit manual ship command records `SHIPPED` and one `FulfillmentShipped` outbox fact.
+Actual application screens using disposable business data:
 
-The opt-in Kafka workflow uses idempotent local transactions, durable bounded retries, consumer-specific DLTs, and explicit recovery. Messaging defaults off. Each service owns its PostgreSQL database and Flyway schema. Docker Compose supplies three business databases, a local Kafka broker, and Keycloak with a separate identity database. Java 21 GitHub Actions jobs are defined for all three services and the packaged workflow; hosted execution awaits repository publication.
+| Dashboard | Orders |
+| --- | --- |
+| ![Dashboard with service availability and workspace navigation](docs/screenshots/dashboard.jpg) | ![Orders workspace showing a confirmed order](docs/screenshots/orders.jpg) |
+| **Inventory** | **Fulfillment** |
+| ![Inventory workspace showing on-hand, reserved and available stock](docs/screenshots/inventory.jpg) | ![Fulfillment workspace showing a manually dispatched order](docs/screenshots/fulfillment.jpg) |
 
-Manual dispatch does not contact a carrier, deduct Inventory stock, or change Order from `CONFIRMED`. The APIs require signed Bearer access tokens with issuer, audience and realm-role validation. Keycloak provides local identity, and the React operations frontend uses Authorization Code with PKCE for browser sign-in. Carrier integration and public deployment remain outside this implementation. See the [HTTP security model](docs/architecture/security.md).
+## Implemented capabilities
 
-## Motivation
+- **Orders:** create and retrieve orders; follow asynchronous `PENDING_INVENTORY`, `CONFIRMED` or `REJECTED` outcomes.
+- **Inventory:** create, look up and update stock by SKU; reserve every order line atomically or reject the entire reservation without changing stock.
+- **Fulfillment:** create a plan from order confirmation, retrieve it by fulfillment or order ID, and record an idempotent manual dispatch with a shipment reference.
+- **Operations workspace:** real service health, role-aware forms, explicit refresh, validation and uncertain-mutation recovery. Business records use ID/SKU lookups.
+- **Identity and diagnostics:** Keycloak sign-in, Viewer/Operator authorization, optional authenticated metrics and distributed tracing, plus an optional local Kubernetes deployment.
 
-Order processing spans independently owned data and operations that can fail at different times. Warexis provides a focused setting for implementing reliable asynchronous coordination, explicit domain ownership, and recovery from duplicate or delayed messages.
+## Architecture
 
-## High-level architecture
-
-The diagram shows the implemented workflow when Kafka messaging is enabled.
+REST handles browser commands and reads. Kafka carries business facts between services when messaging is enabled; it defaults off in standalone service configuration.
 
 ```mermaid
-flowchart LR
-    Client["Authenticated client"] -->|"Bearer REST: create order"| Order["Order Service"]
-    Order --> OrderDB[("Order PostgreSQL database")]
-    Order -->|"OrderPlaced"| Kafka["Kafka"]
-    Kafka -->|"OrderPlaced"| Inventory["Inventory Service"]
-    Inventory --> InventoryDB[("Inventory PostgreSQL database")]
-    Inventory -->|"InventoryReserved or InventoryRejected"| Kafka
-    Kafka -->|"Inventory outcome"| Order
-    Order -->|"OrderConfirmed"| Kafka
-    Kafka -->|"OrderConfirmed"| Fulfillment["Fulfillment Service"]
-    Fulfillment --> FulfillmentDB[("Fulfillment PostgreSQL database")]
-    Operator["Authorized operator"] -->|"Bearer REST: manual ship"| Fulfillment
-    Fulfillment -->|"FulfillmentShipped"| Kafka
+flowchart TB
+    UI["React operations frontend"] -->|"Code flow + PKCE"| Keycloak["Keycloak identity provider"]
+    Keycloak --> IdentityDB[("Identity PostgreSQL")]
+    UI -->|"Bearer REST"| Order["Order Service"]
+    UI -->|"Bearer REST"| Inventory["Inventory Service"]
+    UI -->|"Bearer REST"| Fulfillment["Fulfillment Service"]
+    Order -->|"Local transaction"| OrderDB[("Order PostgreSQL: domain + outbox")]
+    Inventory -->|"Local transaction"| InventoryDB[("Inventory PostgreSQL: domain + outbox")]
+    Fulfillment -->|"Local transaction"| FulfillmentDB[("Fulfillment PostgreSQL: domain + outbox")]
+    Order -.->|"Issuer / signing keys"| Keycloak
+    Inventory -.->|"Issuer / signing keys"| Keycloak
+    Fulfillment -.->|"Issuer / signing keys"| Keycloak
+    Order -->|"Outbox relay: OrderPlaced, OrderConfirmed"| Kafka["Kafka capability event streams"]
+    Kafka -->|"OrderPlaced"| Inventory
+    Inventory -->|"Outbox relay: InventoryReserved, InventoryRejected"| Kafka
+    Kafka -->|"InventoryReserved, InventoryRejected"| Order
+    Kafka -->|"OrderConfirmed"| Fulfillment
+    Fulfillment -->|"Outbox relay: FulfillmentShipped"| Kafka
+    subgraph Observability["Optional local observability"]
+        Prometheus["Prometheus"]
+        Grafana["Grafana"]
+        Tempo["Tempo"]
+        Grafana -->|"Query metrics"| Prometheus
+        Grafana -->|"Query traces"| Tempo
+    end
+    Prometheus -.->|"Authenticated metrics scrape"| Order
+    Prometheus -.->|"Authenticated metrics scrape"| Inventory
+    Prometheus -.->|"Authenticated metrics scrape"| Fulfillment
+    Order -.->|"OTLP traces"| Tempo
+    Inventory -.->|"OTLP traces"| Tempo
+    Fulfillment -.->|"OTLP traces"| Tempo
 ```
 
-Order creation records a `PENDING_INVENTORY` order and its event in one local transaction. Inventory processing can reserve every requested line or reject the entire reservation in its own local transaction; Kafka connects the two services when enabled. The asynchronous outcome moves the order to `CONFIRMED` or `REJECTED`. A successful create request does not imply that inventory has been reserved. Confirmation leads asynchronously to a Fulfillment plan; manual dispatch is a separate command. No current service subscribes to `FulfillmentShipped`.
+Each service controls its own schema and transactions; services exchange events instead of querying another service's database. Outbox rows commit with domain changes, then relays publish them to Kafka. Keycloak owns identity separately from business state. Observability is an optional local stack; it is not included in the Kubernetes manifests.
 
-| Service | Domain ownership | Responsibility |
-| --- | --- | --- |
-| Order | Orders and order lines | Order creation and lifecycle transitions |
-| Inventory | Stock and inventory reservations | Stock availability and all-or-nothing reservations |
-| Fulfillment | Fulfillment plans, original lines, and shipment references | Consume `OrderConfirmed`, expose read/manual ship APIs, and publish `FulfillmentShipped` |
+The [architecture overview](docs/architecture/overview.md) explains service boundaries, transaction guarantees and the complete sequence. See the [domain model](docs/architecture/domain-model.md), [event contracts](docs/architecture/event-contracts.md) and [frontend API contracts](docs/frontend/api-contracts.md) for exact interfaces.
 
-Each service owns its PostgreSQL data. Services must never directly read or modify another service's database. See the [architecture overview](docs/architecture/overview.md), [domain model](docs/architecture/domain-model.md), and [event contracts](docs/architecture/event-contracts.md).
+## Order lifecycle and reliability
 
-## Technology stack
+1. Order creation commits `PENDING_INVENTORY` and `OrderPlaced` together, then returns. A successful HTTP response does not imply reserved stock.
+2. Inventory consumes `OrderPlaced`, locks stock rows in a deterministic order and commits either an all-or-nothing reservation with `InventoryReserved` or a rejection with `InventoryRejected`.
+3. Order accepts the first valid outcome. Confirmation commits `CONFIRMED` and `OrderConfirmed`; rejection becomes `REJECTED`.
+4. Fulfillment consumes `OrderConfirmed` to create one `PENDING` plan. An operator's ship command commits `SHIPPED` and `FulfillmentShipped`; no current service consumes that event.
 
-The service foundations use Java 21, Spring Boot 4.1.1, Maven, Flyway, JPA/Hibernate, and Actuator, with PostgreSQL integration tests using Testcontainers. Local infrastructure uses Docker / Docker Compose, PostgreSQL 18.6, and Apache Kafka 4.2.2. Spring Kafka adapters connect the three-service workflow.
+Kafka decouples order acceptance from downstream availability, with eventual consistency between services. Delivery is at least once: durable event deduplication, business uniqueness and local transactions prevent duplicate effects. Persisted retry budgets, consumer-specific dead-letter topics and explicit recovery bound failures. See the [Kafka recovery guide](docs/architecture/kafka-workflow.md).
 
-Spring Security OAuth2 Resource Server secures the HTTP APIs using local Keycloak 26.8.0 and JWT access tokens. GitHub Actions defines service, real-token security and authenticated workflow verification. The operations frontend uses React, TypeScript and Vite, with unit/component tests and a real-stack Playwright suite. Optional local Prometheus/Grafana metrics and OpenTelemetry/Tempo tracing support workflow diagnosis; trace export defaults off. Optional single-node local kind deployment is provided in the [Kubernetes guide](infrastructure/kubernetes/README.md).
+## Technology and security
 
-## Testing strategy
+| Area | Implementation |
+| --- | --- |
+| Backend | Java 21, Spring Boot 4.1.1, Spring Kafka, Spring Security, JPA/Hibernate, Maven |
+| Persistence and messaging | PostgreSQL 18.6, Flyway, Apache Kafka 4.2.2 |
+| Frontend | React 19, TypeScript, Vite, Keycloak JavaScript adapter |
+| Identity | Keycloak 26.8.0, OAuth2/OIDC, Authorization Code with PKCE S256 |
+| Verification | JUnit, Testcontainers, Vitest, Testing Library, Playwright |
+| Infrastructure | Docker Compose, local kind/Kubernetes, Prometheus, Grafana, OpenTelemetry and Tempo |
 
-All three services have unit tests and real PostgreSQL Testcontainers integration/API tests covering migrations, persistence, request validation, and health. Order verifies order/outbox atomicity. Inventory verifies stock constraints, update locking, all-or-nothing reservations, repeated SKUs, duplicate identities, rollback, and concurrent attempts without overselling. Service Kafka tests and a packaged-service workflow suite exercise real Kafka and PostgreSQL, including poison records, duplicate delivery, durable pause, restart, and recovery.
-
-The [packaged-service workflow suite](tests/workflow/README.md) drives the three HTTP APIs through disposable Kafka and independent databases. Run `scripts/verify-workflow.sh` after the individual service suites. It covers business workflow, real-Keycloak authorization, operational metrics, trace causality and telemetry privacy; `scripts/verify-security.sh` runs only the security subset.
-
-Workflow tests verify that business changes, consumer deduplication records, and outgoing events commit consistently.
+APIs validate JWT signature, issuer, audience and realm roles. Viewer access permits reads; Operator access permits mutations. Browser tokens stay in memory and refresh before protected requests; the backend remains the authorization authority. See the [security model and endpoint matrix](docs/architecture/security.md).
 
 ## Local development
 
-The local development environment uses Java 21 and Maven for the service foundations. Docker Compose provides separate PostgreSQL 18.6 containers for Order, Inventory, and Fulfillment and Apache Kafka 4.2.2 in a single-node KRaft setup, with persistent Docker volumes and health checks.
+Prerequisites: Java 21, Docker Engine with Compose, and Node 24 (at least 24.15) with npm. Maven wrappers are included.
 
-Each service has separate datasource configuration and data ownership. Flyway owns each service's domain, outbox, and processing schemas; Hibernate validates mapped entities. Local environment files must remain untracked; `.env.example` files can document non-secret configuration.
+1. From the repository root, create an ignored local environment file if one does not exist:
 
-Start the local infrastructure and host services using the [local development guide](infrastructure/local/README.md). See the [Order API](services/order-service/README.md), [Inventory API](services/inventory-service/README.md), and [Fulfillment API](services/fulfillment-service/README.md) for request contracts and examples. Follow the [local Keycloak guide](infrastructure/auth/README.md) for required issuer/audience settings and safe test credentials; business APIs require the roles in the [authorization matrix](docs/architecture/security.md).
+   ```sh
+   test -e .env || cp .env.example .env
+   ```
 
-Additional guides:
+   Replace the example passwords before starting fresh databases; preserve credentials for existing volumes. Follow the [local development guide](infrastructure/local/README.md) to start Compose infrastructure and the three host services. Its service commands explicitly enable messaging and map database credentials to the host processes.
+2. Follow the [Keycloak guide](infrastructure/auth/README.md) to configure the issuer, API audience and local users. Keep generated credentials outside Git.
+3. Follow the [frontend guide](frontend/README.md) to configure its public environment and run `npm ci` and `npm run dev` from `frontend/`. Open `http://127.0.0.1:5173` using `127.0.0.1` consistently for login redirects.
 
-- [Operations frontend](frontend/README.md): Node 24 setup, public browser configuration and frontend checks.
-- [Disposable browser fixture](tests/browser-fixture/README.md): isolated services and identity for real-stack browser verification.
-- [Local metrics](infrastructure/monitoring/README.md): authenticated Prometheus scraping and Grafana dashboards.
-- [Local tracing](infrastructure/tracing/README.md): optional Tempo export, durable asynchronous context and privacy boundaries.
-- [Local Kubernetes](infrastructure/kubernetes/README.md): optional single-node kind deployment, local images, persistence and focused acceptance procedures.
+For a disposable verification environment, use the [browser fixture](tests/browser-fixture/README.md). API examples live in the [Order](services/order-service/README.md), [Inventory](services/inventory-service/README.md) and [Fulfillment](services/fulfillment-service/README.md) guides.
 
-To verify all three services independently:
+## Testing and CI
+
+Run each backend suite with Java 21 and Docker available:
 
 ```sh
 (cd services/order-service && ./mvnw --batch-mode --no-transfer-progress verify)
 (cd services/inventory-service && ./mvnw --batch-mode --no-transfer-progress verify)
 (cd services/fulfillment-service && ./mvnw --batch-mode --no-transfer-progress verify)
+scripts/verify-workflow.sh
 ```
 
-Tests require Java 21 and a running Docker Engine. Testcontainers uses disposable PostgreSQL instances rather than the persistent Compose databases.
+Service suites use real disposable PostgreSQL/Kafka to test transactions, locking, validation, idempotency and recovery. The [packaged workflow suite](tests/workflow/README.md) exercises all three executable services, real Keycloak authorization, retries/DLTs, restarts, telemetry isolation and trace causality. `scripts/verify-security.sh` runs its security subset.
 
-## Architecture decisions
+Frontend checks, from `frontend/`:
 
-- [ADR 0001: Service boundaries and database ownership](docs/architecture/adr/0001-service-boundaries-and-database-ownership.md)
-- [ADR 0002: Asynchronous Kafka communication](docs/architecture/adr/0002-asynchronous-kafka-communication.md)
-- [ADR 0003: Transactional outbox and idempotent consumers](docs/architecture/adr/0003-transactional-outbox-and-idempotent-consumers.md)
-- [ADR 0004: Capability event streams and bounded delivery](docs/architecture/adr/0004-message-topology-and-delivery-semantics.md)
-- [ADR 0005: Fulfillment ownership and manual dispatch](docs/architecture/adr/0005-fulfillment-and-manual-dispatch.md)
-- [HTTP security and authorization](docs/architecture/security.md)
-- [Kafka workflow startup and recovery](docs/architecture/kafka-workflow.md)
-- [Packaged-service workflow verification](tests/workflow/README.md)
+```sh
+npm run lint
+npm run typecheck
+npm run typecheck:e2e
+npm test
+npm run build
+```
 
-## Roadmap
+The opt-in [real-stack browser suite](frontend/README.md#automated-real-stack-regression) requires the running disposable fixture and its private runtime credentials. Component tests and browser verification cover different boundaries. GitHub Actions workflows are defined for backend, frontend and packaged workflow checks; hosted execution remains unverified until an actual GitHub Actions run.
 
-1. Service foundations, architecture documentation, and local infrastructure are implemented.
-2. Order creation/read APIs and Inventory stock management/read APIs have service-owned schemas and tests. Service verification CI is defined.
-3. Order and Inventory transactional outboxes, atomic Inventory reservations, and durable Inventory message/business uniqueness are implemented. Version 1 event contracts and delivery topology are documented.
-4. Opt-in Kafka publishers/listeners, bounded durable delivery recovery, Order outcome transitions, and packaged-service workflow verification are implemented.
-5. Fulfillment plans, manual dispatch, `OrderConfirmed`, and `FulfillmentShipped` extend the verified workflow with independent data ownership and recovery coverage.
-6. Local Keycloak identity and stateless JWT resource-server authorization are implemented and verified against the three packaged services.
-7. The operations frontend implements Authorization Code with PKCE, role-aware API workflows and real-stack browser regression. Local metrics and distributed tracing are implemented with explicit privacy and development-only boundaries.
-8. Native Kubernetes manifests and local kind tooling provide an optional single-node deployment, with documented readiness, business workflow, persistence, restart and rollout verification procedures.
+## Observability and local Kubernetes
+
+[Prometheus and Grafana](infrastructure/monitoring/README.md) expose authenticated local metrics and dashboards. Optional [OpenTelemetry and Tempo tracing](infrastructure/tracing/README.md) carries durable context through outboxes and Kafka, including asynchronous retries and restart. Manual dispatch starts from its current HTTP request and links to the original confirmation. Trace export defaults off; telemetry failure does not change business transactions.
+
+The [Kubernetes guide](infrastructure/kubernetes/README.md) provides a single-node kind deployment with local images, independent persistent volumes, readiness checks and controlled recovery procedures. It uses HTTP, one Kafka broker and one replica per workload, with node-local storage.
+
+## Design decisions and limitations
+
+Read the decisions on [service ownership](docs/architecture/adr/0001-service-boundaries-and-database-ownership.md), [asynchronous Kafka communication](docs/architecture/adr/0002-asynchronous-kafka-communication.md), [transactional outboxes](docs/architecture/adr/0003-transactional-outbox-and-idempotent-consumers.md), [delivery topology](docs/architecture/adr/0004-message-topology-and-delivery-semantics.md) and [manual fulfillment](docs/architecture/adr/0005-fulfillment-and-manual-dispatch.md).
+
+- Dispatch records a manual handoff. It does not contact a carrier, deduct stock or change the confirmed Order state. Stock release, reservation expiry and physical stock consumption are not implemented.
+- The APIs provide individual record lookups, not collection browsing, aggregate analytics, customer management, payments or an event-history interface.
+- Outbox, deduplication and delivery records have no automatic retention policy; dead-letter redrive requires diagnosis and deliberate operator recovery.
+- Compose and Kubernetes are local development environments. Production TLS, high availability, replicated-broker failover, capacity benchmarks and public deployment are outside the verified scope.

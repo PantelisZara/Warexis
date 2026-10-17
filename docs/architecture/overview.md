@@ -54,6 +54,14 @@ Publication and delivery are separate operations. Messages can be delayed or del
 
 The [version 1 event contracts](event-contracts.md) and [ADR 0004](adr/0004-message-topology-and-delivery-semantics.md) define capability streams, order keys, consumer groups, three-partition source/DLT topology, bounded technical retries, and explicit recovery. Consumers acknowledge only after their local transaction commits, or after confirmed DLT publication for an unprocessable record. All three services persist bounded delivery state and restore paused partitions on assignment. See [startup and explicit recovery](kafka-workflow.md).
 
+## Identity and asynchronous tracing
+
+Keycloak is an independent identity provider with its own PostgreSQL database. It handles sign-in, token issuance and realm roles without making business services own passwords or browser sessions. The React client uses Authorization Code with PKCE S256, keeps tokens in memory and sends Bearer tokens to each service through the local same-origin proxy. Each API validates signature, issuer, audience and roles. No access token is propagated through business events. See the [HTTP security model](security.md).
+
+When optional tracing is enabled, a local transaction stores a nullable `traceparent` beside its outbox event. Relay spans preserve that durable origin across restart, and Kafka consumers continue the incoming producer context. Processing retries appear as sibling attempts. Manual dispatch uses the current HTTP request and links to the first confirmation origin. Trace export strips business identifiers, payloads and credentials; it can drop telemetry without changing transaction or acknowledgment behavior. [The tracing guide](../../infrastructure/tracing/README.md) details context boundaries and privacy.
+
+Optional Prometheus scrapes authenticated service metrics; Grafana queries Prometheus and, with the tracing overlay, Tempo. These local diagnostics are separate from the business workflow. The single-node Kubernetes deployment does not include the monitoring stack.
+
 ## Inventory transaction boundary
 
 Reservation is all-or-nothing across an order's lines in one Inventory transaction. The internal application service validates original lines, aggregates demand for repeated SKUs, locks stock rows in deterministic order, and records the reservation decision, processed-event identity, and corresponding outcome outbox event. A rejected reservation leaves stock quantities unchanged. Unique order and event identities protect against repeated delivery; conflicting identities fail without business mutation. A Kafka adapter invokes the application service; no public reservation HTTP endpoint exists.

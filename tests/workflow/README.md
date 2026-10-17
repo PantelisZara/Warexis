@@ -75,13 +75,13 @@ run and cleaned up; existing Compose containers and volumes are untouched. The
 suite fails if Docker, a service JAR, or workflow startup is unavailable; it does
 not silently skip real-broker checks.
 
-## Phase 6 workflow extensions
+## Fulfillment workflow coverage
 
 The suite covers full original confirmation snapshots, independent groups and validated unsubscribed events, concurrent identical manual dispatch, immutable shipment origin, duplicate confirmation and same-order aliases after dispatch/restart, conflicting confirmation and wrong-stream Inventory trigger DLT, seven malformed-confirmation vectors, pending OrderConfirmed and FulfillmentShipped outbox JVM recovery, global reference ownership, Fulfillment broker exhaustion/explicit recovery, four-attempt technical rollback/DLT/recovery, and atomic ship/outbox rollback. It also applies the existing post-business-commit checkpoint failure, database outage, and paused-partition/DLT restart matrix to Fulfillment.
 
 A successful order now owns one OrderPlaced and one OrderConfirmed outbox fact; rejection owns only OrderPlaced. Existing fault injections and stored-envelope assertions target the intended event type instead of relying on a single arbitrary row. Original stock, decision, no-mutation, retry-budget, source-offset and recovery assertions remain in place. New poison checks also compare Fulfillment plans, processed confirmations and shipment events after independently waiting for the prior consumer workload to complete.
 
-Run individual full service test/verify lifecycles first and supply their rebuilt current binaries when using separate worktrees. Local verification of the three-service workflow does not imply hosted CI execution; hosted results require an actual hosted run.
+Run each full service `./mvnw --batch-mode --no-transfer-progress verify` lifecycle first and supply its current binaries when using separate checkouts. Local verification of the three-service workflow does not imply hosted CI execution; hosted results require an actual hosted run.
 
 ## Real Keycloak security gate
 

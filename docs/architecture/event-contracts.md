@@ -188,7 +188,7 @@ The V1 envelope uses `aggregateId = correlationId = payload.orderId`, `causation
 
 ### FulfillmentShipped
 
-Fulfillment produces this fact on `warexis.fulfillment.events.v1` atomically with manual dispatch. No service subscribes to this output in Phase 6. Its aggregate is `fulfillmentId`, correlation and Kafka key are `orderId`, and `occurredAt` is the server-owned `shippedAt`. The immediate cause is a REST operator command without an event identity, so `causationId` is omitted. The workflow origin is explicit `payload.orderConfirmedEventId`.
+Fulfillment produces this fact on `warexis.fulfillment.events.v1` atomically with manual dispatch. No current service subscribes to this output. Its aggregate is `fulfillmentId`, correlation and Kafka key are `orderId`, and `occurredAt` is the server-owned `shippedAt`. The immediate cause is a REST operator command without an event identity, so `causationId` is omitted. The workflow origin is explicit `payload.orderConfirmedEventId`.
 
 Payload: `{fulfillmentId,orderId,reservationId,orderConfirmedEventId,shipmentReference,shippedAt,lines}`. The internal case-sensitive reference matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and belongs to one fulfillment. Repeating the identical ship command returns the original projection/time and emits no additional fact. A changed terminal reference or reference reused by another fulfillment is a conflict with no mutation.
 

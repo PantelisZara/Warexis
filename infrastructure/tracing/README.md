@@ -43,7 +43,7 @@ export in application processes; configure those processes separately as below.
 Normal configured sampling is 0.1; sampling1.0 belongs only in disposable acceptance.
 The existing authenticated Grafana, Prometheus datasource and dashboards are
 unchanged. Preparation also creates private Grafana provisioning for an optional
-monitoring overlay: it copies the accepted Prometheus datasource and dashboard
+monitoring overlay: it copies the existing Prometheus datasource and dashboard
 provider unchanged, and adds the read-only `warexis-tempo` datasource. The base
 monitoring stack does not receive this datasource.
 
@@ -76,9 +76,10 @@ to select an external temporary directory.
 
 These checks cover external paths, private modes, caller identity, configuration
 copying, fresh-only generation and port validation. Compose parsing and an actual
-owned Tempo readiness check remain separate runtime checks. Full application
-export, stored-span privacy, asynchronous causality, persistence/restart, outage,
-Grafana and official Browser acceptance remain required before Phase9C completion.
+owned Tempo readiness check remain separate runtime checks. Validate application
+export, stored-span privacy, asynchronous causality, persistence/restart, exporter
+outage and rendered Grafana traces separately
+against the running stack.
 
 ## Application tracing
 
@@ -129,5 +130,6 @@ root. It rebuilds the JARs, preserves the existing authenticated business and
 privacy cases, and adds causal-flow, dispatch-link, exporter-outage and transport
 context scenarios. Existing poison, retry, partition and restart cases also
 inspect durable context and actual stored attempt relationships where applicable.
-This command does not replace each service's full `./mvnw test` and `./mvnw verify`
-lifecycles or the separate frontend and official Browser acceptance gates.
+Run each service's full `./mvnw --batch-mode --no-transfer-progress verify`
+separately. Frontend checks and browser inspection of Grafana exercise additional
+boundaries beyond these packaged workflow tests.

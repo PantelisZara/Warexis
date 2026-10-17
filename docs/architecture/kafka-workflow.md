@@ -165,7 +165,7 @@ terminal state and identity validation prevent a contradictory decision.
 
 ## Verification
 
-Run each service's `./mvnw test` and `./mvnw verify`, then run the
+Run each service's `./mvnw --batch-mode --no-transfer-progress verify`, then run the
 [packaged-service Kafka workflow suite](../../tests/workflow/README.md).
 These suites use disposable real PostgreSQL/Kafka infrastructure. Service tests
 repeatedly synchronize oversubscribed reservations, overlapping/reversed SKU

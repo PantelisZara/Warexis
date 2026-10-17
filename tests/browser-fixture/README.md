@@ -1,12 +1,12 @@
 # Disposable browser test stack
 
-This test-only Maven module holds a real Kafka, three business PostgreSQL databases, a separate Keycloak PostgreSQL database, Keycloak 26.8.0, and the three packaged Warexis services open for official in-app Browser QA. It does not launch, install, or automate a browser. All published infrastructure and HTTP ports bind to loopback. Existing developer containers are never discovered, stopped, or reused.
+This test-only Maven module holds a real Kafka, three business PostgreSQL databases, a separate Keycloak PostgreSQL database, Keycloak 26.8.0, and the three packaged Warexis services open for browser QA. It does not launch, install, or automate a browser. All published infrastructure and HTTP ports bind to loopback. Existing developer containers are never discovered, stopped, or reused.
 
 The fixture creates ephemeral Viewer and Operator users through Keycloak administration. Login still uses the public `warexis-operations` client and authorization code flow with PKCE S256. There is no SPA password grant, test business service account, token file, or SQL business-data seed. Create stock through the operator UI during the test.
 
 ## Launch and stop
 
-Prerequisites: Java 21, Docker, the reviewed Phase 8 realm containing the public operations client, and freshly built executable Order, Inventory and Fulfillment JARs in the chosen integrated source tree. The fixture rejects a missing JAR or a realm without the public PKCE client before starting Docker resources.
+Prerequisites: Java 21, Docker, the repository realm containing the public operations client, and freshly built executable Order, Inventory and Fulfillment JARs in the chosen source tree. The fixture rejects a missing JAR or a realm without the public PKCE client before starting Docker resources.
 
 From the checkout containing this fixture:
 
@@ -31,7 +31,7 @@ Stop from another terminal by creating the exact `stopFile` recorded in private 
 
 ## Required real-browser flow
 
-Use the official in-app Browser plugin for exploratory QA. Separately, the explicitly authorized opt-in [frontend Playwright suite](../../frontend/README.md#automated-real-stack-regression) can verify the same running disposable stack. The fixture itself launches no browser; automated regression and official Browser exploratory QA remain separate gates and must not be claimed passed from fixture unit tests or health checks.
+Use the running stack for exploratory browser QA. The opt-in [frontend Playwright suite](../../frontend/README.md#automated-real-stack-regression) can verify the same disposable environment. The fixture itself launches no browser; fixture unit tests and health checks do not establish successful browser workflows.
 
 1. Open the SPA anonymously; verify navigation, public health, explicit login and no business data disclosed.
 2. Log in as the ephemeral Operator through the real Keycloak page. Verify the redirect/code exchange and PKCE, with tokens only in application memory.

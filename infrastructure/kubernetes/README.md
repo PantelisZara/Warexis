@@ -26,7 +26,7 @@ no system package changes. Run from the repository root:
 ```sh
 bash infrastructure/kubernetes/scripts/install-tools.sh
 export WAREXIS_K8S_TOOLS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/warexis/kubernetes/bin"
-export WAREXIS_K8S_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/warexis-supervisor/phase11/kind"
+export WAREXIS_K8S_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/warexis/kubernetes"
 export PATH="$WAREXIS_K8S_TOOLS_DIR:$PATH"
 bash infrastructure/kubernetes/scripts/cluster.sh create
 # JAVA_HOME must select an installed Java 21 JDK.
@@ -131,7 +131,7 @@ identity provisioning helper and real HTTP/Kubernetes APIs. It never starts a
 parallel Compose fixture. Run its stages once against this isolated cluster:
 
 ```sh
-export WAREXIS_K8S_ACCEPTANCE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/warexis-supervisor/phase11/acceptance"
+export WAREXIS_K8S_ACCEPTANCE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/warexis/kubernetes/acceptance"
 a() { python3 infrastructure/kubernetes/scripts/acceptance.py "$@" --runtime-dir "$WAREXIS_K8S_ACCEPTANCE_DIR" --kubeconfig "$WAREXIS_K8S_STATE_DIR/kubeconfig"; }
 a infrastructure
 a setup --bootstrap-file "$WAREXIS_K8S_STATE_DIR/secrets/runtime.env"
@@ -153,12 +153,10 @@ synthetic IDs and sanitized status. Tokens are never persisted. If provisioning
 or a workflow stops partway through, inspect the saved private inventory before
 retrying; do not blindly recreate accounts or business records.
 
-Use the official in-app Browser for frontend acceptance: Operator login, existing
-order/fulfillment lookup, persisted stock, Viewer read-only access, reload, token
-refresh and logout. The same `runtime.json` fits the existing frontend disposable
-fixture shape. Browser evidence remains a separate gate from successful HTTP
-checks. Reuse unchanged source-matched backend/frontend historical verification;
-do not run all suites merely to populate this cluster.
+Verify the frontend in a browser: Operator login, existing order/fulfillment
+lookup, persisted stock, Viewer read-only access, reload, token refresh and logout.
+The same `runtime.json` fits the frontend disposable fixture shape. HTTP acceptance
+checks do not verify rendered behavior, keyboard use or browser authentication.
 
 ## Controlled restart, recovery and rollout
 
