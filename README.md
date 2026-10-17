@@ -48,7 +48,7 @@ Each service owns its PostgreSQL data. Services must never directly read or modi
 
 The service foundations use Java 21, Spring Boot 4.1.1, Maven, Flyway, JPA/Hibernate, and Actuator, with PostgreSQL integration tests using Testcontainers. Local infrastructure uses Docker / Docker Compose, PostgreSQL 18.6, and Apache Kafka 4.2.2. Spring Kafka adapters connect the three-service workflow.
 
-Spring Security OAuth2 Resource Server secures the HTTP APIs using local Keycloak 26.8.0 and JWT access tokens. GitHub Actions defines service, real-token security and authenticated workflow verification. The operations frontend uses React, TypeScript and Vite, with unit/component tests and a real-stack Playwright suite. Optional local Prometheus/Grafana metrics and OpenTelemetry/Tempo tracing support workflow diagnosis; trace export defaults off. Local Kubernetes remains deferred.
+Spring Security OAuth2 Resource Server secures the HTTP APIs using local Keycloak 26.8.0 and JWT access tokens. GitHub Actions defines service, real-token security and authenticated workflow verification. The operations frontend uses React, TypeScript and Vite, with unit/component tests and a real-stack Playwright suite. Optional local Prometheus/Grafana metrics and OpenTelemetry/Tempo tracing support workflow diagnosis; trace export defaults off. Optional single-node local kind deployment is provided in the [Kubernetes guide](infrastructure/kubernetes/README.md).
 
 ## Testing strategy
 
@@ -72,6 +72,7 @@ Additional guides:
 - [Disposable browser fixture](tests/browser-fixture/README.md): isolated services and identity for real-stack browser verification.
 - [Local metrics](infrastructure/monitoring/README.md): authenticated Prometheus scraping and Grafana dashboards.
 - [Local tracing](infrastructure/tracing/README.md): optional Tempo export, durable asynchronous context and privacy boundaries.
+- [Local Kubernetes](infrastructure/kubernetes/README.md): optional single-node kind deployment, local images, persistence and focused acceptance procedures.
 
 To verify all three services independently:
 
@@ -103,4 +104,4 @@ Tests require Java 21 and a running Docker Engine. Testcontainers uses disposabl
 5. Fulfillment plans, manual dispatch, `OrderConfirmed`, and `FulfillmentShipped` extend the verified workflow with independent data ownership and recovery coverage.
 6. Local Keycloak identity and stateless JWT resource-server authorization are implemented and verified against the three packaged services.
 7. The operations frontend implements Authorization Code with PKCE, role-aware API workflows and real-stack browser regression. Local metrics and distributed tracing are implemented with explicit privacy and development-only boundaries.
-8. Evaluate local Kubernetes and provisioning only when they solve a concrete requirement.
+8. Native Kubernetes manifests and local kind tooling provide an optional single-node deployment, with documented readiness, business workflow, persistence, restart and rollout verification procedures.
