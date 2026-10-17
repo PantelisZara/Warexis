@@ -3,7 +3,7 @@
 This test-only Maven module runs all three packaged service JARs as separate Java 21
 processes, one disposable Apache Kafka 4.2.2 broker, three independent disposable
 business PostgreSQL 18.6 databases, and actual Keycloak 26.8.0 with a separate
-identity PostgreSQL database. Real Keycloak OPERATOR tokens authenticate external
+identity PostgreSQL database, plus disposable Tempo for trace assertions. Real Keycloak OPERATOR tokens authenticate external
 HTTP workflow commands; Kafka events contain no access credentials. HTTP requests drive the workflow; Kafka clients observe
 DLTs and replay events; SQL observes durable invariants and performs explicit
 recovery only inside the test database. It does not use the local Compose stack.
@@ -40,7 +40,7 @@ records in both directions, and malformed/version/key/UTF-8/trailing-token/
 duplicate-property poison records. DLT checks select the current record using source topic, partition, offset, and
 consumer group, including when historical records have identical key and bytes.
 They preserve bytes, key, source partition and source identity/group headers, confirm source offset progress,
-and verify no domain mutation. The suite preserves the original 28 Phase 5 cases and extends the consumer
+and verify no domain mutation. The suite covers Order/Inventory processing and extends the consumer
 directions to Fulfillment for these recovery boundaries:
 
 - A committed pending outbox survives forced JVM termination and publishes the
@@ -77,7 +77,7 @@ not silently skip real-broker checks.
 
 ## Phase 6 workflow extensions
 
-The suite preserves 47 packaged workflow cases and adds four real-token security cases (51 total). Its new cases cover full original confirmation snapshots, independent groups and validated unsubscribed events, concurrent identical manual dispatch, immutable shipment origin, duplicate confirmation and same-order aliases after dispatch/restart, conflicting confirmation and wrong-stream Inventory trigger DLT, seven malformed-confirmation vectors, pending OrderConfirmed and FulfillmentShipped outbox JVM recovery, global reference ownership, Fulfillment broker exhaustion/explicit recovery, four-attempt technical rollback/DLT/recovery, and atomic ship/outbox rollback. It also applies the existing post-business-commit checkpoint failure, database outage, and paused-partition/DLT restart matrix to Fulfillment.
+The suite covers full original confirmation snapshots, independent groups and validated unsubscribed events, concurrent identical manual dispatch, immutable shipment origin, duplicate confirmation and same-order aliases after dispatch/restart, conflicting confirmation and wrong-stream Inventory trigger DLT, seven malformed-confirmation vectors, pending OrderConfirmed and FulfillmentShipped outbox JVM recovery, global reference ownership, Fulfillment broker exhaustion/explicit recovery, four-attempt technical rollback/DLT/recovery, and atomic ship/outbox rollback. It also applies the existing post-business-commit checkpoint failure, database outage, and paused-partition/DLT restart matrix to Fulfillment.
 
 A successful order now owns one OrderPlaced and one OrderConfirmed outbox fact; rejection owns only OrderPlaced. Existing fault injections and stored-envelope assertions target the intended event type instead of relying on a single arbitrary row. Original stock, decision, no-mutation, retry-budget, source-offset and recovery assertions remain in place. New poison checks also compare Fulfillment plans, processed confirmations and shipment events after independently waiting for the prior consumer workload to complete.
 
@@ -85,8 +85,8 @@ Run individual full service test/verify lifecycles first and supply their rebuil
 
 ## Real Keycloak security gate
 
-`scripts/verify-security.sh` builds current executable JARs and runs only the four
-packaged security cases. `scripts/verify-workflow.sh` runs all 51 cases. Neither
+`scripts/verify-security.sh` builds current executable JARs and runs only the
+packaged security subset. `scripts/verify-workflow.sh` runs the full suite. Neither
 subset success nor old binary evidence establishes full workflow success.
 
 The fixture imports the exact repository realm, checks OIDC discovery and JWKS,
@@ -126,3 +126,14 @@ Metric privacy checks reject business identifiers and credential material in the
 scrapes. These checks use the packaged services and signed disposable Keycloak
 JWTs; they do not require Prometheus or Grafana. Dashboard acceptance is a separate
 real monitoring-stack gate.
+
+## Distributed tracing regression
+
+The packaged services export to a disposable real Tempo instance. Assertions query
+stored traces for the HTTP-to-outbox-to-Kafka causal chain, manual-dispatch links
+to the original confirmation, durable context across restart, retry/DLT attempt
+relationships, malformed transport context and exporter outages. Stored-span
+privacy checks reject business identifiers and credentials. Trace export failure
+does not change business transaction or delivery guarantees. See the
+[tracing guide](../../infrastructure/tracing/README.md) for configuration and
+privacy boundaries; Grafana rendering remains a separate live-stack check.

@@ -8,7 +8,7 @@ Warexis implements three independently owned services: Order, Inventory, and Ful
 
 The opt-in Kafka workflow uses idempotent local transactions, durable bounded retries, consumer-specific DLTs, and explicit recovery. Messaging defaults off. Each service owns its PostgreSQL database and Flyway schema. Docker Compose supplies three business databases, a local Kafka broker, and Keycloak with a separate identity database. Java 21 GitHub Actions jobs are defined for all three services and the packaged workflow; hosted execution awaits repository publication.
 
-Manual dispatch does not contact a carrier, deduct Inventory stock, or change Order from `CONFIRMED`. The APIs require signed Bearer access tokens with issuer, audience and realm-role validation. Keycloak provides local identity; a frontend, carrier integration and public deployment remain outside this implementation. See the [HTTP security model](docs/architecture/security.md).
+Manual dispatch does not contact a carrier, deduct Inventory stock, or change Order from `CONFIRMED`. The APIs require signed Bearer access tokens with issuer, audience and realm-role validation. Keycloak provides local identity, and the React operations frontend uses Authorization Code with PKCE for browser sign-in. Carrier integration and public deployment remain outside this implementation. See the [HTTP security model](docs/architecture/security.md).
 
 ## Motivation
 
@@ -44,27 +44,34 @@ Order creation records a `PENDING_INVENTORY` order and its event in one local tr
 
 Each service owns its PostgreSQL data. Services must never directly read or modify another service's database. See the [architecture overview](docs/architecture/overview.md), [domain model](docs/architecture/domain-model.md), and [event contracts](docs/architecture/event-contracts.md).
 
-## Technology direction
+## Technology stack
 
 The service foundations use Java 21, Spring Boot 4.1.1, Maven, Flyway, JPA/Hibernate, and Actuator, with PostgreSQL integration tests using Testcontainers. Local infrastructure uses Docker / Docker Compose, PostgreSQL 18.6, and Apache Kafka 4.2.2. Spring Kafka adapters connect the three-service workflow.
 
-Spring Security OAuth2 Resource Server secures the HTTP APIs using local Keycloak 26.8.0 and JWT access tokens. GitHub Actions defines service, real-token security and authenticated workflow verification. React, TypeScript, Playwright, observability and local Kubernetes remain later milestones.
+Spring Security OAuth2 Resource Server secures the HTTP APIs using local Keycloak 26.8.0 and JWT access tokens. GitHub Actions defines service, real-token security and authenticated workflow verification. The operations frontend uses React, TypeScript and Vite, with unit/component tests and a real-stack Playwright suite. Optional local Prometheus/Grafana metrics and OpenTelemetry/Tempo tracing support workflow diagnosis; trace export defaults off. Local Kubernetes remains deferred.
 
 ## Testing strategy
 
 All three services have unit tests and real PostgreSQL Testcontainers integration/API tests covering migrations, persistence, request validation, and health. Order verifies order/outbox atomicity. Inventory verifies stock constraints, update locking, all-or-nothing reservations, repeated SKUs, duplicate identities, rollback, and concurrent attempts without overselling. Service Kafka tests and a packaged-service workflow suite exercise real Kafka and PostgreSQL, including poison records, duplicate delivery, durable pause, restart, and recovery.
 
-The [packaged-service workflow suite](tests/workflow/README.md) drives the three HTTP APIs through disposable Kafka and independent databases. Run `scripts/verify-workflow.sh` after the individual service suites. Its 51 cases include all 47 preserved workflow cases plus four real-Keycloak security cases; `scripts/verify-security.sh` runs only the security subset.
+The [packaged-service workflow suite](tests/workflow/README.md) drives the three HTTP APIs through disposable Kafka and independent databases. Run `scripts/verify-workflow.sh` after the individual service suites. It covers business workflow, real-Keycloak authorization, operational metrics, trace causality and telemetry privacy; `scripts/verify-security.sh` runs only the security subset.
 
 Workflow tests verify that business changes, consumer deduplication records, and outgoing events commit consistently.
 
-## Local development direction
+## Local development
 
 The local development environment uses Java 21 and Maven for the service foundations. Docker Compose provides separate PostgreSQL 18.6 containers for Order, Inventory, and Fulfillment and Apache Kafka 4.2.2 in a single-node KRaft setup, with persistent Docker volumes and health checks.
 
 Each service has separate datasource configuration and data ownership. Flyway owns each service's domain, outbox, and processing schemas; Hibernate validates mapped entities. Local environment files must remain untracked; `.env.example` files can document non-secret configuration.
 
 Start the local infrastructure and host services using the [local development guide](infrastructure/local/README.md). See the [Order API](services/order-service/README.md), [Inventory API](services/inventory-service/README.md), and [Fulfillment API](services/fulfillment-service/README.md) for request contracts and examples. Follow the [local Keycloak guide](infrastructure/auth/README.md) for required issuer/audience settings and safe test credentials; business APIs require the roles in the [authorization matrix](docs/architecture/security.md).
+
+Additional guides:
+
+- [Operations frontend](frontend/README.md): Node 24 setup, public browser configuration and frontend checks.
+- [Disposable browser fixture](tests/browser-fixture/README.md): isolated services and identity for real-stack browser verification.
+- [Local metrics](infrastructure/monitoring/README.md): authenticated Prometheus scraping and Grafana dashboards.
+- [Local tracing](infrastructure/tracing/README.md): optional Tempo export, durable asynchronous context and privacy boundaries.
 
 To verify all three services independently:
 
@@ -95,5 +102,5 @@ Tests require Java 21 and a running Docker Engine. Testcontainers uses disposabl
 4. Opt-in Kafka publishers/listeners, bounded durable delivery recovery, Order outcome transitions, and packaged-service workflow verification are implemented.
 5. Fulfillment plans, manual dispatch, `OrderConfirmed`, and `FulfillmentShipped` extend the verified workflow with independent data ownership and recovery coverage.
 6. Local Keycloak identity and stateless JWT resource-server authorization are implemented and verified against the three packaged services.
-7. Prepare an operational client using Authorization Code with PKCE and add observability as their prerequisites become stable.
+7. The operations frontend implements Authorization Code with PKCE, role-aware API workflows and real-stack browser regression. Local metrics and distributed tracing are implemented with explicit privacy and development-only boundaries.
 8. Evaluate local Kubernetes and provisioning only when they solve a concrete requirement.

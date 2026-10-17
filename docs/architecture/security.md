@@ -54,8 +54,9 @@ HTTP Basic, form login, logout handlers, HTTP sessions and request caching are
 disabled. The backend does not issue authentication cookies. CSRF protection is
 disabled for this explicit-header Bearer model because browsers do not
 automatically attach its credentials as cookies. This rationale does not apply
-to a future cookie-authenticated design. CORS is deferred until an actual browser
-client has a defined origin and flow.
+to a future cookie-authenticated design. The local browser client uses Vite's
+same-origin proxy for business API requests; the services do not enable browser
+CORS. See the [browser networking contract](../frontend/api-contracts.md#browser-networking).
 
 Security applies at the HTTP boundary. Kafka carries domain facts, never user
 JWTs, authorization headers or access-token fields. Listeners still use their
@@ -75,10 +76,12 @@ variable. Service curl examples assume an authorized short-lived token already
 provided by a trusted local OIDC client in `WAREXIS_ACCESS_TOKEN`; do not commit,
 save in an environment file, or log that token.
 
-Keycloak runs development HTTP on loopback. No production TLS, production
-identity operations, browser login or frontend authentication is supplied.
-Future React access will use Authorization Code with PKCE; that client and its
-origin/redirect/logout configuration remain a later phase.
+Keycloak runs development HTTP on loopback. The [operations frontend](../../frontend/README.md)
+uses the public `warexis-operations` client with Authorization Code and PKCE S256.
+Tokens stay in adapter memory and refresh before protected requests; backend
+issuer, audience and role checks remain authoritative. Local redirect, logout and
+web origins are configured as described in the [identity guide](../../infrastructure/auth/README.md).
+Production TLS and production identity operations remain outside this implementation.
 
 ## Verification
 
@@ -88,15 +91,15 @@ requiring Keycloak. The [packaged verifier](../../tests/workflow/README.md) star
 actual Keycloak, a separate identity PostgreSQL, Kafka and three independent
 business PostgreSQL databases, then launches the current executable JARs.
 
-Its four security cases verify discovery/JWKS and real signed token issuer,
+Its security cases verify discovery/JWKS and real signed token issuer,
 audience and realm-role claims, missing/invalid/expired credentials, wrong and
 missing audience, a different issuer with the intended API audience, VIEWER
 reads/denied mutations, OPERATOR reads/mutations, role conversion negatives,
 health, additional-route denial, duplicate-header semantics and absence of
 authentication cookies or access credentials in stored domain events.
-The full run adds all 47 preserved distributed-system cases with authenticated
-external HTTP commands. The internal three-service chain and every original
-DLT, restart, retry, offset and idempotency assertion remain in place.
+The full run also exercises authenticated business commands, operational metrics,
+trace causality and telemetry privacy. The internal three-service chain and its
+DLT, restart, retry, offset and idempotency assertions remain in place.
 Local verification does not establish hosted CI success or production readiness.
 
 ## Local metrics collector

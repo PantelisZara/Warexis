@@ -6,7 +6,7 @@ Order, Inventory, and Fulfillment use Java 21, Spring Boot 4.1.1, Maven, indepen
 
 The opt-in workflow coordinates inventory acceptance and manual dispatch. Order creation stores `OrderPlaced`. Inventory records an atomic reservation or rejection and its outcome. Order atomically records its terminal inventory decision and, for success, one `OrderConfirmed`. Fulfillment consumes that fact to create one immutable full-order plan in `PENDING`; a manual operator command moves it to `SHIPPED` and records one `FulfillmentShipped`. Messaging defaults off. Durable attempt budgets, relay/partition pause, and consumer-specific DLT routing bound recovery.
 
-The HTTP APIs use stateless JWT resource-server authorization with local Keycloak and a separate identity database. See the [security model and endpoint matrix](security.md). Carriers, payment, customer/address data, production identity/deployment and a frontend remain outside this implementation.
+The HTTP APIs use stateless JWT resource-server authorization with local Keycloak and a separate identity database. See the [security model and endpoint matrix](security.md). The [operations frontend](../../frontend/README.md) uses the existing REST APIs and a public Keycloak client with Authorization Code and PKCE; its [API contract](../frontend/api-contracts.md) documents browser networking and current capabilities. Optional [local metrics](../../infrastructure/monitoring/README.md) and [tracing](../../infrastructure/tracing/README.md) support diagnosis without changing the business workflow. Carriers, payment, customer/address data and production identity/deployment remain outside this implementation.
 
 ## Ownership and communication
 

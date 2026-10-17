@@ -182,9 +182,9 @@ then completes several later order IDs on the same partition. Restarting again
 with a new same-partition record proves completed DLT state does not resurrect.
 Broker-outage scenarios also retain unpublished event identity and an exhausted
 relay budget across Order or Fulfillment restart until explicit operator recovery.
-The 47 preserved workflow cases run alongside four real-Keycloak security cases
-(51 total). The workflow preserves the original 28 Order/Inventory cases and
-adds confirmation, manual dispatch, duplicate/alias/conflict handling, immutable
+The workflow includes real-Keycloak authorization, operational metrics, telemetry
+privacy and causal-trace checks against Tempo. It covers Order/Inventory processing,
+confirmation, manual dispatch, duplicate/alias/conflict handling, immutable
 shipment origin, reference ownership, pending confirmation/shipment outbox
 recovery, technical rollback, and Fulfillment restart/DLT/paused-partition checks.
 These run against the current three executable JARs, separately from full service
