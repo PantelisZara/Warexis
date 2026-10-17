@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: warexis-config
+data:
+  SERVER_ADDRESS: 0.0.0.0
+  FULFILLMENT_HTTP_ADDRESS: 0.0.0.0
+  WAREXIS_MESSAGING_ENABLED: "true"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  WAREXIS_OAUTH2_ISSUER_URI: http://127.0.0.1:18080/realms/warexis
+  WAREXIS_OAUTH2_AUDIENCE: warexis-api
+  SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/warexis/protocol/openid-connect/certs
+  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65.0 -XX:ActiveProcessorCount=2

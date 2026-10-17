@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: warexis
+  labels:
+    app.kubernetes.io/part-of: warexis
+    warexis.io/environment: local-kind

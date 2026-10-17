@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: warexis
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - stateful.yaml
+  - identity.yaml
+  - apps.yaml
+configMapGenerator:
+  - name: frontend-nginx
+    files:
+      - default.conf=frontend-nginx.conf
+generatorOptions:
+  disableNameSuffixHash: true
