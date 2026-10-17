@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
-state="${WAREXIS_K8S_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/warexis-supervisor/phase11/kind}"
+state="${WAREXIS_K8S_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/warexis/kubernetes}"
 tools="${WAREXIS_K8S_TOOLS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/warexis/kubernetes/bin}"
 export PATH="$tools:$PATH"
 config="$state/kubeconfig"

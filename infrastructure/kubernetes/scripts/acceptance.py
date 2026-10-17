@@ -264,7 +264,7 @@ def main():
     data_home = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share'))
     state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state'))
     parser.add_argument('--kubectl', default=str(data_home / 'warexis/kubernetes/bin/kubectl'))
-    parser.add_argument('--kubeconfig', default=str(state_home / 'warexis-supervisor/phase11/kind/kubeconfig'))
+    parser.add_argument('--kubeconfig', default=str(state_home / 'warexis/kubernetes/kubeconfig'))
     args = parser.parse_args()
     try:
         directory = runtime_directory(args.runtime_dir)
