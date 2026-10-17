@@ -61,6 +61,9 @@ change the user-global kubeconfig. Internal Services use Kubernetes DNS names su
 as `order:8081`, `inventory:8082`, `fulfillment:8083`, `kafka:29092` and
 `order-postgres:5432`. Each business service owns a separate database; Keycloak
 owns a fourth. Database and Kafka ports are not published to the host.
+Kafka advertises `kafka-0.kafka-headless:29092` through a headless Service that
+publishes unready addresses, so metadata discovery works during startup; the
+`kafka:29092` bootstrap Service still routes only to a ready broker.
 
 Open the frontend at **http://127.0.0.1:5173** and Keycloak at
 **http://127.0.0.1:18080**. Use `127.0.0.1` consistently. The frontend Nginx proxy

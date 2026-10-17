@@ -113,6 +113,16 @@ def validate(documents, base):
     services = {name: d for (kind, name), d in objects.items() if kind == 'Service'}
     require({'order', 'inventory', 'fulfillment', 'frontend', 'kafka', 'keycloak', 'order-postgres',
              'inventory-postgres', 'fulfillment-postgres', 'keycloak-postgres'} <= services.keys(), 'Required Service missing')
+    kafka = objects['StatefulSet', 'kafka']
+    kafka_env = {item['name']: item for item in kafka['spec']['template']['spec']['containers'][0]['env']}
+    require(kafka_env['KAFKA_ADVERTISED_LISTENERS']['value'] ==
+            'INTERNAL://kafka-0.kafka-headless:29092', 'Kafka metadata must use stable Pod DNS independent of readiness')
+    require(kafka['spec']['serviceName'] == 'kafka-headless', 'Kafka stable Pod DNS requires its governing headless Service')
+    headless = services['kafka-headless']['spec']
+    require(headless.get('clusterIP') == 'None' and headless.get('publishNotReadyAddresses') is True,
+            'Kafka discovery must work before the broker becomes Ready')
+    require(any(port['port'] == 29092 for port in headless['ports']), 'Headless discovery must expose the broker listener')
+    require(not services['kafka']['spec'].get('publishNotReadyAddresses', False), 'Bootstrap Service must remain readiness gated')
     for name, service in services.items():
         spec = service['spec']
         expected = 'NodePort' if name in ('frontend', 'keycloak') else 'ClusterIP'
