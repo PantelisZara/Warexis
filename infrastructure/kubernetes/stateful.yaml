@@ -492,6 +492,9 @@ spec:
   - name: controller
     port: 29093
     targetPort: controller
+  - name: broker
+    port: 29092
+    targetPort: broker
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -541,8 +544,9 @@ spec:
           value: 1@kafka-0.kafka-headless:29093
         - name: KAFKA_LISTENERS
           value: INTERNAL://:29092,CONTROLLER://:29093
+        # Metadata must stay resolvable before the readiness-gated bootstrap Service.
         - name: KAFKA_ADVERTISED_LISTENERS
-          value: INTERNAL://kafka:29092
+          value: INTERNAL://kafka-0.kafka-headless:29092
         - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
           value: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
         - name: KAFKA_INTER_BROKER_LISTENER_NAME
