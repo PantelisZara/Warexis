@@ -1,7 +1,5 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/warexis-logo-light.svg">
-  <img src="frontend/public/brand/warexis-logo-dark.svg" alt="Warexis" width="320">
-</picture>
+<a href="#gh-light-mode-only"><img src="frontend/public/brand/warexis-logo-dark.svg#gh-light-mode-only" alt="Warexis" width="320"></a>
+<a href="#gh-dark-mode-only"><img src="frontend/public/brand/warexis-logo-light.svg#gh-dark-mode-only" alt="Warexis" width="320"></a>
 
 # Warexis
 
