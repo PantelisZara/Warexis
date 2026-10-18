@@ -939,6 +939,10 @@ class KafkaWorkflowTests {
             assertThat(count(INVENTORY_DB, "SELECT count(*) FROM outbox_events WHERE correlation_id=? AND published_at IS NOT NULL", order)).isEqualTo(1);
             noUnsafePayloadLogs();
         } finally { TEMPO.resume(); }
+        // Unpausing Tempo does not drain the bounded asynchronous exporter queues.
+        awaitTraceExportRecovery(orderPort, "order-service");
+        awaitTraceExportRecovery(inventoryPort, "inventory-service");
+        awaitTraceExportRecovery(fulfillmentPort, "fulfillment-service");
         String context = randomTraceparent();
         var response = tracedRequest(orderPort, "/api/orders", "POST",
                 JSON.writeValueAsString(Map.of("lines", List.of(line(sku, 1)))), context);
@@ -1051,11 +1055,33 @@ class KafkaWorkflowTests {
         }, "real Tempo causal chain across durable outboxes and all three services", Duration.ofSeconds(30));
     }
 
+    private static void awaitTraceExportRecovery(int port, String service) throws Exception {
+        String context = randomTraceparent();
+        long[] nextProbe = {0};
+        await(() -> {
+            try {
+                if (System.nanoTime() >= nextProbe[0]) {
+                    // Retry only read-only probes; a dropped span cannot reappear by querying it.
+                    nextProbe[0] = System.nanoTime() + Duration.ofSeconds(1).toNanos();
+                    assertThat(tracedRequest(port, "/actuator/health", "GET", null, context).statusCode()).isEqualTo(200);
+                }
+                return TEMPO.trace(context.substring(3, 35), "export-recovery-" + service).stream()
+                        .anyMatch(span -> span.service().equals(service) && span.name().equals("http.request")
+                                && span.kind().equals("SPAN_KIND_SERVER") && span.trace().equals(context.substring(3, 35))
+                                && span.parent().equals(context.substring(36, 52)));
+            } catch (java.io.IOException | TempoFixture.IncompleteTrace notYet) { return false; }
+            catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Trace recovery probe interrupted", interrupted);
+            }
+        }, "stored post-outage HTTP trace from " + service, Duration.ofSeconds(30));
+    }
+
     private static String randomTraceparent() {
         return "00-" + UUID.randomUUID().toString().replace("-", "") + "-"
                 + UUID.randomUUID().toString().replace("-", "").substring(0, 16) + "-01";
     }
-    private static HttpResponse<String> tracedRequest(int port, String path, String method, String body, String parent) throws Exception {
+    private static HttpResponse<String> tracedRequest(int port, String path, String method, String body, String parent) throws java.io.IOException, InterruptedException {
         return HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).timeout(Duration.ofSeconds(5))
                 .header("Content-Type", "application/json").header("Authorization", "Bearer " + IDENTITY.token("operator"))
                 .header("traceparent", parent).header("baggage", "private=TRACE_PRIVATE_QUERY")
