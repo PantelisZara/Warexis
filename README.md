@@ -1,4 +1,7 @@
-<img src="frontend/public/brand/warexis-icon-red.svg" alt="Warexis symbol" width="52">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/warexis-logo-light.svg">
+  <img src="frontend/public/brand/warexis-logo-dark.svg" alt="Warexis" width="320">
+</picture>
 
 # Warexis
 

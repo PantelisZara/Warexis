@@ -26,13 +26,13 @@ sequenceDiagram
     participant Operator as Local Operator
     Client->>Order: Create order (REST)
     Note over Order: Commit PENDING_INVENTORY order and outbox event
-    Order-->>Client: Order recorded; inventory pending
+    Order-->>Client: Order recorded, inventory pending
     Order->>Kafka: Publish OrderPlaced through outbox relay
     Kafka->>Inventory: Deliver OrderPlaced
     Note over Inventory: Commit reservation decision and outbox event
     Inventory->>Kafka: Publish InventoryReserved or InventoryRejected
     Kafka->>Order: Deliver inventory outcome
-    Note over Order: Commit decision; CONFIRMED also records OrderConfirmed
+    Note over Order: Commit decision, CONFIRMED also records OrderConfirmed
     Order->>Kafka: Publish OrderConfirmed on success
     Kafka->>Fulfillment: Deliver OrderConfirmed
     Note over Fulfillment: Commit one PENDING plan and processed identity
