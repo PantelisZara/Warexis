@@ -126,7 +126,9 @@ npm test
 npm run build
 ```
 
-The opt-in [real-stack browser suite](frontend/README.md#automated-real-stack-regression) requires the running disposable fixture and its private runtime credentials. Component tests and browser verification cover different boundaries. GitHub Actions workflows are defined for backend, frontend and packaged workflow checks; hosted execution remains unverified until an actual GitHub Actions run.
+The opt-in [real-stack browser suite](frontend/README.md#automated-real-stack-regression) requires the running disposable fixture and its private runtime credentials. Component tests and browser verification cover different boundaries.
+
+Hosted GitHub Actions runs passed on 18 October 2026: [Service verification](https://github.com/PantelisZara/Warexis/actions/runs/39087775798) ran all three Maven service suites, identity and monitoring/tracing configuration checks, and the packaged Keycloak-authenticated Kafka workflow described above. [Frontend verification](https://github.com/PantelisZara/Warexis/actions/runs/39087775766) ran locked dependency installation, lint, application and browser-suite typechecks, component/API tests, and the production build. The opt-in browser suite is not executed by these workflows; live monitoring dashboards and local Kubernetes acceptance require their separate environments.
 
 ## Observability and local Kubernetes
 
